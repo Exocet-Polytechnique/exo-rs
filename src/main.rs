@@ -3,60 +3,66 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::{adc::{Adc, SampleTime}, gpio::{Input, Level, Output, Pull, Speed}, peripherals::{ADC2, PA10, PA4, PA8, PA9, PB13, PB14, PB5, PC13}};
+use embassy_stm32::{gpio::{Level, Output, Speed, Input, Pull}, Config, peripherals::{PA8, PA6, PA7, PB13, PB11, FDCAN1, PA11, PA12 }, bind_interrupts, can};
 use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
+mod can_exocet;
+use can_exocet::{Priority, Subsystem};
 
 static mut ERROR_FLAG: bool = false;
+
+     bind_interrupts!(struct Irqs {
+    FDCAN1_IT0 => can::IT0InterruptHandler<FDCAN1>;
+    FDCAN1_IT1 => can::IT1InterruptHandler<FDCAN1>;
+});
 
 #[derive(Debug)]
 enum State {
     Idle,
-    VerifyAllClose,
-    VerifyActOpen,
-    VerifyActClose,
     Active,
+    Init,
+    Shutdown,
     Error
 }
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    let mut config = Config::default();
+    {
+        use embassy_stm32::rcc::*;
+        config.rcc.hsi = true;
+        config.rcc.pll = Some(Pll {
+            source: PllSource::HSI,
+            prediv: PllPreDiv::DIV4,
+            mul: PllMul::MUL85,
+            divp: None,
+            divq: None,
+            // Main system clock at 170 MHz
+            divr: Some(PllRDiv::DIV2),
+        });
+        config.rcc.sys = Sysclk::PLL1_R;
+    }
+    let p = embassy_stm32::init(config);
 
-    let p = embassy_stm32::init(Default::default());
-    
-    spawner.spawn(state_machine(spawner, p.PC13, p.PB5, p.PA10, p.PB13, p.PB14, 
-        p.PA8, p.PA9)).unwrap(); // Tâche: Machine à états
-
-    spawner.spawn(monitor_adc(spawner, p.ADC2, p.PA4)).unwrap(); // Tâche: Lecture constante du senseur
+    spawner.spawn(state_machine(spawner, p.PA8, p.PA6, p.PA7, p.PB13, p.PB11, p.FDCAN1, p.PA11, p.PA12)).unwrap(); // Tâche: Machine à états
 }
 
 #[embassy_executor::task]
-async fn monitor_adc(_spawner: Spawner, _adc_2: ADC2, _pin_a4: PA4) {
-    // let mut pressure_sensor = Adc::new(adc_2);
-    // pressure_sensor.set_sample_time(SampleTime::CYCLES24_5);
-    // let mut pin = pin_a4;
-    // loop {
-    //     let measured = pressure_sensor.read(&mut pin).await.unwrap();
-    //     info!("measured: {}", measured);
-    //     Timer::after_millis(500).await;
-    //     }
-    // TODO: Implementer la lecture constante du senseur.
-    }
+async fn state_machine(spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7, pin_b13: PB13, pin_b11: PB11, pin_fdcan1: FDCAN1, pin_a11: PA11, pin_a12: PA12) {
 
-#[embassy_executor::task]
-async fn state_machine(_spawner: Spawner, pin_c13:PC13, pin_b5:PB5, pin_a10: PA10, pin_b13: PB13, pin_b14: PB14, 
-    pin_a8: PA8, pin_a9: PA9) {
+    let mut led_g = Output::new(pin_a8, Level::High, Speed::Low); //Green LED
+    let mut led_y = Output::new(pin_a6, Level::High, Speed::Low); //Yellow LED
+    let mut led_r = Output::new(pin_a7, Level::High, Speed::Low); //Red LED
 
-    let button = Input::new(pin_c13, Pull::Down);
-    let act1_in = Input::new(pin_b5, Pull::Down);
-    let act2_in = Input::new(pin_a10, Pull::Down);
-    let mut act1_out = Output::new(pin_b13, Level::High, Speed::Low);
-    let mut act2_out = Output::new(pin_b14, Level::High, Speed::Low);
-    let mut led = Output::new(pin_a8, Level::Low, Speed::Low);
-    let mut led_err = Output::new(pin_a9, Level::Low, Speed::Low);
-    
+    let button_g = Input::new(pin_b13, Pull::Down); //Green Button
+    let button_r = Input::new(pin_b11, Pull::Down); //Red Button
+
+    let can = can::CanConfigurator::new(pin_fdcan1, pin_a11, pin_a12, Irqs);
+    let mut can = can.start(can::OperatingMode::NormalOperationMode);
+
+    let mut last_read_ts = embassy_time::Instant::now();
+
     let mut state = State::Idle;
-    let mut act_counter: i8 = 0; 
     loop { 
 
         if unsafe { ERROR_FLAG } {
@@ -66,94 +72,83 @@ async fn state_machine(_spawner: Spawner, pin_c13:PC13, pin_b5:PB5, pin_a10: PA1
         match state{
             State::Idle=>{
 
-                if button.is_high(){
-                    state = State::VerifyAllClose;
+
+                if button_g.is_high(){
+                    state = State::Init;
                 }
 
-                led.set_low();
-                Timer::after_millis(10).await;
+                led_r.set_high();
+                Timer::after_millis(100).await;
+            }
+
+            State::Init=>{
+
+                info!("Initialisation des composants");
+                led_r.set_low();
+                led_g.set_low();
+                led_y.set_high();
+
+                Timer::after_millis(3000).await;
+
+                let frame = can::frame::Frame::new_extended(Subsystem::Broadcast.to_u32(), &[0; 8]).unwrap();
+                info!("Writing frame");
+
+                _ = can.write(&frame).await;
+
+                match can.read().await {
+                    Ok(envelope) => {
+                        let (ts, rx_frame) = (envelope.ts, envelope.frame);
+                        let delta = (ts - last_read_ts).as_millis();
+                        last_read_ts = ts;
+
+                        state = State::Active;
+
+                        info!(
+                            "Rx: {} {:02x} --- {}ms",
+                            rx_frame.header().len(),
+                            rx_frame.data()[0..rx_frame.header().len() as usize],
+                            delta,
+                        )
+                    }
+                    Err(_err) => error!("Error in frame"),
+                }
+
             }
 
             State::Active=>{
-                info!("Mode actif");
-                led.set_high();
-                Timer::after_millis(10).await;
+
+                if button_r.is_high(){
+                    state = State::Shutdown;
+                }
+
+                info!("Système actif");
+                led_g.set_high();
+                led_y.set_low();
+                led_r.set_low(); 
+
             }
 
-            State::VerifyAllClose=>{
+            State::Shutdown=>{
+                info!("Arrêt du système");
+                led_g.set_low();
+                led_y.set_high();
+                led_r.set_low();
 
-                info!("Verification des actuateurs dans 3s");
                 Timer::after_millis(3000).await;
 
-                if act1_in.is_low() || act2_in.is_low() {
-                    state = State::Error;
-                } else {
-                    state = State::VerifyActOpen;
-                }
-            }
-
-            State::VerifyActOpen=>{
-
-                if act_counter == 0 {
-                    act1_out.set_high();
-                    info!("Ouverture de l'actuateur 1");
-                    Timer::after_millis(1000).await;
-                    if act1_in.is_low(){
-                        state = State::Error;
-                    } else {
-                        state = State::VerifyActClose;
-                        info!("Actuateur 1 valide");
-                    }
-                }
-
-                else if act_counter == 1 {
-                    act2_out.set_high();
-                    info!("Ouverture de l'actuateur 2");
-                    Timer::after_millis(1000).await;
-                    if act2_in.is_low(){
-                        state = State::Error;
-                    } else {
-                        state = State::VerifyActClose;
-                        info!("Actuateur 2 valide");
-                    }
-                }
-
-                else {
-                    state = State::Error;
-                }
-            }
-
-            State::VerifyActClose=>{
-                if act_counter == 0 {
-                    act1_out.set_low();
-                    Timer::after_millis(1000).await;
-                    if act1_in.is_high(){
-                        state = State::Error;
-                    } else {
-                        act_counter += 1;
-                        state = State::VerifyActOpen;
-                    }
-                } 
-
-                else if act_counter == 1 {
-                    act2_out.set_low();
-                    Timer::after_millis(1000).await;
-                    if act2_in.is_high(){
-                        state = State::Error;
-                    } else {
-                        state = State::Active;
-                    }
-                } 
-
-                else {
-                    state = State::Error;
-                }
+                state = State::Idle;
             }
 
             State::Error=>{
-                act1_out.set_low();
-                act2_out.set_low();
-                led_err.set_high();
+
+                led_g.set_low();
+                led_y.set_low();
+                if led_r.is_set_high() {
+                    led_r.set_low();
+                } else {
+                    led_r.set_high();
+                }
+                info!("Erreur détectée, clignotement de la LED rouge");
                 Timer::after_millis(10).await;
             }
         }
