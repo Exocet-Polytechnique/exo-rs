@@ -6,8 +6,10 @@ use embassy_executor::Spawner;
 use embassy_stm32::{gpio::{Level, Output, Speed, Input, Pull}, Config, peripherals::{PA8, PA6, PA7, PB13, PB11, FDCAN1, PA11, PA12 }, bind_interrupts, can};
 use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
+
 mod can_exocet;
-use can_exocet::{Priority, Subsystem};
+use can_exocet::interface::CanDriver;
+use can_exocet::enums::{Priority, Subsystem};
 
 static mut ERROR_FLAG: bool = false;
 
@@ -60,9 +62,9 @@ async fn state_machine(spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7, 
     let can = can::CanConfigurator::new(pin_fdcan1, pin_a11, pin_a12, Irqs);
     let mut can = can.start(can::OperatingMode::NormalOperationMode);
 
-    let mut last_read_ts = embassy_time::Instant::now();
-
     let mut state = State::Idle;
+
+    let mut can_driver = CanDriver::new(can);
     loop { 
 
         if unsafe { ERROR_FLAG } {
@@ -89,29 +91,10 @@ async fn state_machine(spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7, 
                 led_y.set_high();
 
                 Timer::after_millis(3000).await;
-
-                let frame = can::frame::Frame::new_extended(Subsystem::Broadcast.to_u32(), &[0; 8]).unwrap();
                 info!("Writing frame");
 
-                _ = can.write(&frame).await;
+                can_driver.send_message(Subsystem::Broadcast, Priority::CriticalErrorMessage, 6, true, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]).await.unwrap();
 
-                match can.read().await {
-                    Ok(envelope) => {
-                        let (ts, rx_frame) = (envelope.ts, envelope.frame);
-                        let delta = (ts - last_read_ts).as_millis();
-                        last_read_ts = ts;
-
-                        state = State::Active;
-
-                        info!(
-                            "Rx: {} {:02x} --- {}ms",
-                            rx_frame.header().len(),
-                            rx_frame.data()[0..rx_frame.header().len() as usize],
-                            delta,
-                        )
-                    }
-                    Err(_err) => error!("Error in frame"),
-                }
 
             }
 
