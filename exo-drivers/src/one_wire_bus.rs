@@ -9,6 +9,9 @@
 //! - [DS18B20 datasheet](https://www.analog.com/media/en/technical-documentation/data-sheets/DS18B20.pdf)
 //! - [Book of iButton(r) Standards](https://www.analog.com/media/en/technical-documentation/tech-articles/book-of-ibuttonreg-standards.pdf)
 //! - [Interfacing the DS18X20/DS1822 1-Wire(r) Temperature Sensor in a Microcontroller Environment ](https://www.analog.com/en/resources/technical-articles/interfacing-the-ds18x20ds1822-1wire-temperature-sensor-in-a-microcontroller-environment.html)
+//!
+//! # Example
+//! See [`crate::ds18b20`]
 
 use core::result::Result::*;
 
