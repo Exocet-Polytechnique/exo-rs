@@ -3,7 +3,7 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::{gpio::{Level, Output, Speed, Input, Pull}, Config, peripherals::{PA8, PA6, PA7, PB13, PB11, FDCAN1, PA11, PA12 }, bind_interrupts, can};
+use embassy_stm32::{bind_interrupts, can, gpio::{Input, Level, Output, Pull, Speed}, peripherals::{FDCAN1, PA11, PA12, PA6, PA7, PA8, PB11, PB13 }, time::Hertz, Config};
 use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -21,9 +21,8 @@ static mut ERROR_FLAG: bool = false;
 #[derive(Debug)]
 enum State {
     Idle,
-    Active,
-    Init,
-    Shutdown,
+    Send,
+    Receive,
     Error
 }
 
@@ -32,16 +31,19 @@ async fn main(spawner: Spawner) {
     let mut config = Config::default();
     {
         use embassy_stm32::rcc::*;
-        config.rcc.hsi = true;
+        config.rcc.hse = Some(Hse {
+            freq: Hertz(24_000_000),
+            mode: HseMode::Oscillator,
+        });
         config.rcc.pll = Some(Pll {
-            source: PllSource::HSI,
-            prediv: PllPreDiv::DIV4,
+            source: PllSource::HSE,
+            prediv: PllPreDiv::DIV6,
             mul: PllMul::MUL85,
             divp: None,
-            divq: None,
-            // Main system clock at 170 MHz
-            divr: Some(PllRDiv::DIV2),
+            divq: Some(PllQDiv::DIV8), // 42.5 Mhz for fdcan.
+            divr: Some(PllRDiv::DIV2), // Main system clock at 170 MHz
         });
+        config.rcc.mux.fdcansel = mux::Fdcansel::PLL1_Q;
         config.rcc.sys = Sysclk::PLL1_R;
     }
     let p = embassy_stm32::init(config);
@@ -60,7 +62,8 @@ async fn state_machine(spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7, 
     let button_r = Input::new(pin_b11, Pull::Down); //Red Button
 
     let can = can::CanConfigurator::new(pin_fdcan1, pin_a11, pin_a12, Irqs);
-    let mut can = can.start(can::OperatingMode::NormalOperationMode);
+    can.set_bitrate(250_000);
+    let can = can.start(can::OperatingMode::NormalOperationMode);
 
     let mut state = State::Idle;
 
@@ -76,50 +79,48 @@ async fn state_machine(spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7, 
 
 
                 if button_g.is_high(){
-                    state = State::Init;
+                    state = State::Send;
+                }
+
+                if button_r.is_high(){
+                    state = State::Receive;
                 }
 
                 led_r.set_high();
                 Timer::after_millis(100).await;
             }
 
-            State::Init=>{
+            State::Send=>{
 
-                info!("Initialisation des composants");
+                info!("Sending Mode");
                 led_r.set_low();
-                led_g.set_low();
-                led_y.set_high();
+                led_g.set_high();
+                led_y.set_low();
 
                 Timer::after_millis(3000).await;
                 info!("Writing frame");
 
-                can_driver.send_message(Subsystem::Broadcast, Priority::CriticalErrorMessage, 6, true, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]).await.unwrap();
-
-
+                loop{
+                    can_driver.send_message(Priority::CriticalErrorMessage, Subsystem::Broadcast,  3, true, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]).await.unwrap();
+                }
             }
 
-            State::Active=>{
+            State::Receive=>{
 
-                if button_r.is_high(){
-                    state = State::Shutdown;
-                }
+                info!("Receiving Mode");
 
                 info!("Système actif");
-                led_g.set_high();
-                led_y.set_low();
-                led_r.set_low(); 
-
-            }
-
-            State::Shutdown=>{
-                info!("Arrêt du système");
                 led_g.set_low();
                 led_y.set_high();
-                led_r.set_low();
+                led_r.set_low(); 
 
-                Timer::after_millis(3000).await;
+                loop{
+                    let (frame, ts) = can_driver.read_message().await.unwrap();
+                    info!("Received Header: {:?}", frame.header());
+                    info!("Received Data: {:?}", frame.data());
+                    info!("Received Timestamp: {:?}", ts);
+                }
 
-                state = State::Idle;
             }
 
             State::Error=>{
