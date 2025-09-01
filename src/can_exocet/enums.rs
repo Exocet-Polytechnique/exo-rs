@@ -19,13 +19,6 @@ pub enum Subsystem {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub enum FrameType {
-    State = 0x00,
-    Ping = 0x01,
-    Data = 0x02,
-    Procedure = 0x03
-}
-
 pub enum StateSubtype {
     StateAnnouncement = 0x00,
     RequestConfirmation = 0x01,

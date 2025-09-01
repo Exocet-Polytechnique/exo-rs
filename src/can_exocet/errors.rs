@@ -2,5 +2,6 @@
 pub enum CanError {
     InvalidModule,
     FrameError,
-    DroppedFrame
+    DroppedFrame,
+    InvalidPayload
 }

@@ -5,6 +5,8 @@ use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{bind_interrupts, can, gpio::{Input, Level, Output, Pull, Speed}, peripherals::{FDCAN1, PA11, PA12, PA6, PA7, PA8, PB11, PB13 }, time::Hertz, Config};
 use embassy_time::Timer;
+use crate::can_exocet::{enums::{DataSubtype, FrameType}, interface::CanFrameExocet};
+
 use {defmt_rtt as _, panic_probe as _};
 
 mod can_exocet;
@@ -52,7 +54,7 @@ async fn main(spawner: Spawner) {
 }
 
 #[embassy_executor::task]
-async fn state_machine(spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7, pin_b13: PB13, pin_b11: PB11, pin_fdcan1: FDCAN1, pin_a11: PA11, pin_a12: PA12) {
+async fn state_machine(_spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7, pin_b13: PB13, pin_b11: PB11, pin_fdcan1: FDCAN1, pin_a11: PA11, pin_a12: PA12) {
 
     let mut led_g = Output::new(pin_a8, Level::High, Speed::Low); //Green LED
     let mut led_y = Output::new(pin_a6, Level::High, Speed::Low); //Yellow LED
@@ -61,7 +63,7 @@ async fn state_machine(spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7, 
     let button_g = Input::new(pin_b13, Pull::Down); //Green Button
     let button_r = Input::new(pin_b11, Pull::Down); //Red Button
 
-    let can = can::CanConfigurator::new(pin_fdcan1, pin_a11, pin_a12, Irqs);
+    let mut can = can::CanConfigurator::new(pin_fdcan1, pin_a11, pin_a12, Irqs);
     can.set_bitrate(250_000);
     let can = can.start(can::OperatingMode::NormalOperationMode);
 
@@ -101,7 +103,8 @@ async fn state_machine(spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7, 
                 info!("Writing frame");
 
                 loop{
-                    can_driver.send_message(Priority::CriticalErrorMessage, Subsystem::Broadcast,  3, true, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]).await.unwrap();
+                    let can_frame = CanFrameExocet::new(FrameType::Data(DataSubtype::DataRequest), 3).unwrap();
+                    can_driver.send_message(Priority::CriticalErrorMessage, Subsystem::Broadcast,  3, true, can_frame).await.unwrap();
                 }
             }
 
