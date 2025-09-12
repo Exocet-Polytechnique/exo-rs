@@ -1,3 +1,3 @@
 pub mod enums;
-pub mod interface;
+pub mod sender;
 pub mod errors;

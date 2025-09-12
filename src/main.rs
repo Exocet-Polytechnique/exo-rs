@@ -5,12 +5,12 @@ use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{bind_interrupts, can, gpio::{Input, Level, Output, Pull, Speed}, peripherals::{FDCAN1, PA11, PA12, PA6, PA7, PA8, PB11, PB13 }, time::Hertz, Config};
 use embassy_time::Timer;
-use crate::can_exocet::{enums::{DataSubtype, FrameType}, interface::CanFrameExocet};
+use crate::can_exocet::{enums::FrameType, errors::CanError, sender::CanFrameExocet};
 
 use {defmt_rtt as _, panic_probe as _};
 
 mod can_exocet;
-use can_exocet::interface::CanDriver;
+use can_exocet::sender::CanDriver;
 use can_exocet::enums::{Priority, Subsystem};
 
 static mut ERROR_FLAG: bool = false;
@@ -99,19 +99,16 @@ async fn state_machine(_spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7,
                 led_g.set_high();
                 led_y.set_low();
 
-                Timer::after_millis(3000).await;
-                info!("Writing frame");
-
                 loop{
-                    let can_frame = CanFrameExocet::new(FrameType::Data(DataSubtype::DataRequest), 3).unwrap();
-                    can_driver.send_message(Priority::CriticalErrorMessage, Subsystem::Broadcast,  3, true, can_frame).await.unwrap();
+
+                    info!("Writing frame");
+                    Timer::after_millis(3000).await;
+                    let can_frame = CanFrameExocet::new(FrameType::State(can_exocet::enums::StateSubtype::StateAnnouncement), 3).unwrap();
+                     can_driver.send_message(Priority::CriticalErrorMessage, Subsystem::Broadcast, 2, true, can_frame).await.unwrap();
                 }
             }
-
             State::Receive=>{
-
                 info!("Receiving Mode");
-
                 info!("Système actif");
                 led_g.set_low();
                 led_y.set_high();
@@ -123,11 +120,8 @@ async fn state_machine(_spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7,
                     info!("Received Data: {:?}", frame.data());
                     info!("Received Timestamp: {:?}", ts);
                 }
-
             }
-
             State::Error=>{
-
                 led_g.set_low();
                 led_y.set_low();
                 if led_r.is_set_high() {

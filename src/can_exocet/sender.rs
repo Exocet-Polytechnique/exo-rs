@@ -40,7 +40,7 @@ impl<'a> CanDriver<'a> {
         let id= priority_bits | subsystem_bits | local_bit | module_bits as u16;
 
         let can_frame = can::frame::Frame::new_standard(id, &frame.payload).unwrap();
-        _ = self.can.write(&can_frame).await.ok_or(CanError::FrameError)?;
+        _ = self.can.write(&can_frame).await;
 
         if let Some(_dropped_frame) = self.can.write(&can_frame).await {
         return Err(CanError::DroppedFrame);
@@ -169,7 +169,7 @@ impl CanFrameExocet {
                         Ok(Self{payload})
                     },
                     ProcedureSubtype::ProcedureRequest => {
-                        // Take prodcedure id as data (usually broadcasted so no address needed for now)
+                        // Takes prodcedure id as data (usually broadcasted so no address needed for now)
                         let payload = data.to_be_bytes();
                         Ok(Self{payload})
                     },
