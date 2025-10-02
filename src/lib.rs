@@ -8,7 +8,7 @@ extern crate cortex_m_rt;
 pub use cortex_m_rt::entry;
 
 pub use hal::pac;
-
+pub mod modem;
 pub mod pins;
 pub mod sercom;
 #[cfg(feature = "usb")]
