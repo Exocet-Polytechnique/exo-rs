@@ -3,5 +3,6 @@ pub enum CanError {
     InvalidModule,
     FrameError,
     DroppedFrame,
-    InvalidPayload
+    InvalidPayload,
+    ExtendedHeaderReceived
 }

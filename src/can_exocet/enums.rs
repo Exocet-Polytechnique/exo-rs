@@ -12,9 +12,8 @@ pub enum Subsystem {
     Broadcast = 0x1F,
     StateControl = 0x01, 
     HydrogenManagement = 0x02,
-    FcControllers = 0x03,
-    Power = 0x04,
-    Batteries = 0x05,
+    HighPower = 0x04,
+    LowPower = 0x05,
     Telemetry = 0x06,
 }
 

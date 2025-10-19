@@ -5,12 +5,12 @@ use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{bind_interrupts, can, gpio::{Input, Level, Output, Pull, Speed}, peripherals::{FDCAN1, PA11, PA12, PA6, PA7, PA8, PB11, PB13 }, time::Hertz, Config};
 use embassy_time::Timer;
-use crate::can_exocet::{enums::FrameType, errors::CanError, sender::CanFrameExocet};
+use crate::can_exocet::{enums::FrameType, can_driver::CanFrameExocet};
 
 use {defmt_rtt as _, panic_probe as _};
 
 mod can_exocet;
-use can_exocet::sender::CanDriver;
+use can_exocet::can_driver::CanDriver;
 use can_exocet::enums::{Priority, Subsystem};
 
 static mut ERROR_FLAG: bool = false;
@@ -103,8 +103,8 @@ async fn state_machine(_spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7,
 
                     info!("Writing frame");
                     Timer::after_millis(3000).await;
-                    let can_frame = CanFrameExocet::new(FrameType::State(can_exocet::enums::StateSubtype::StateAnnouncement), 3).unwrap();
-                     can_driver.send_message(Priority::CriticalErrorMessage, Subsystem::Broadcast, 2, true, can_frame).await.unwrap();
+                    let can_frame = CanFrameExocet::new(FrameType::State(can_exocet::enums::StateSubtype::StateAnnouncement), 3, Priority::CriticalErrorMessage, Subsystem::Broadcast, true, 3).unwrap();
+                     can_driver.send_message(can_frame).await.unwrap();
                 }
             }
             State::Receive=>{
@@ -116,9 +116,7 @@ async fn state_machine(_spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7,
 
                 loop{
                     let (frame, ts) = can_driver.read_message().await.unwrap();
-                    info!("Received Header: {:?}", frame.header());
-                    info!("Received Data: {:?}", frame.data());
-                    info!("Received Timestamp: {:?}", ts);
+                    info!("Frame received at time: {:?}", ts);
                 }
             }
             State::Error=>{
