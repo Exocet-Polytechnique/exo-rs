@@ -25,12 +25,7 @@ default-features = false
 version = "0.2"
 optional = true
 
-[dev-dependencies]
-cortex-m = "0.7"
-usbd-serial = "0.1"
-panic-halt = "0.2"
-panic-semihosting = "0.5"
-cortex-m-rtic = "1.0"
+
 
 [features]
 # ask the HAL to enable atsamd21g support
@@ -49,12 +44,15 @@ chip = "ATSAMD21G18A"
 embedded-hal = { version = "0.2.7", features = ["unproven"] }
 heapless = "0.9.1"
 nb = "1.0"
+panic-halt = "0.2"
+panic-semihosting = "0.5"
+cortex-m = "0.7"
+usbd-serial = "0.1"
+cortex-m-rtic = "1.0"
+
 
 [[example]]
 name = "blinky_basic"
-
-[[example]]
-name = "modem"
 
 [[example]]
 name = "blinky_rtic"

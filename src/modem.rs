@@ -1,21 +1,19 @@
 #![no_std]
 
-use core::fmt::Write as FmtWrite;
-
-use embedded_hal::serial::{Read, Write};
+use core::fmt::{self, Write as FmtWrite};
 use embedded_hal::digital::v2::{InputPin, OutputPin};
-
+use embedded_hal::serial::{Read, Write};
 use heapless::String;
 use nb;
-use nb::Error as NbError;
 
+// Constantes de temps (en ms)
 pub const MODEM_MIN_RESPONSE_OR_URC_WAIT_MS: u32 = 20;
 pub const BUF_CAP: usize = 512;
-pub const POWER_ON_PULSE_MS: u32 = 200;
+pub const POWER_ON_PULSE_MS: u32 = 150;
+pub const POWER_OFF_PULSE_MS: u32 = 1500;
 pub const BOOT_DELAY_MS: u32 = 200;
-pub const SHORT_WAIT_MS: u32 = 50;
-pub const RESET_PULSE_MS: u32 = 50;
-pub const HARD_RESET_LOW_MS: u32 = 10_000;
+pub const SHORT_WAIT_MS: u32 = 100;
+pub const RESET_PULSE_MS: u32 = 10_000;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ModemState {
@@ -32,21 +30,29 @@ pub enum ModemReady {
     CmeError = 4,
 }
 
+// NOUVEAU : Un wrapper pour séparer les erreurs de lecture et d'écriture
+#[derive(Debug, Copy, Clone)]
+pub enum DriverError<RxErr, TxErr> {
+    Rx(RxErr),
+    Tx(TxErr),
+    Timeout, // Ajout utile pour les wait
+}
+
 pub struct Modem<U, RST, PWR, VINT> {
     uart: U,
     reset: RST,
     power: PWR,
-    vint_pin: Option<VINT>, // input-only: used to detect power state if available
-    buf: String<BUF_CAP>,
+    vint_pin: Option<VINT>,
+    pub buf: String<BUF_CAP>,
     state: ModemState,
     last_response_or_urc_ms: u32,
     ready: ModemReady,
-    // TODO: URC handlers (Vec/array of fn(&str) or trait objects) — left out for now
 }
 
-impl<U, RST, PWR, VINT, E> Modem<U, RST, PWR, VINT>
+// CHANGEMENT ICI : On déclare RxErr et TxErr séparément
+impl<U, RST, PWR, VINT, RxErr, TxErr> Modem<U, RST, PWR, VINT>
 where
-    U: Read<u8, Error = E> + Write<u8, Error = E>,
+    U: Read<u8, Error = RxErr> + Write<u8, Error = TxErr>,
     RST: OutputPin,
     PWR: OutputPin,
     VINT: InputPin,
@@ -64,208 +70,161 @@ where
         }
     }
 
-    /// begin expects the caller to provide a monotonic function `now_ms` (e.g. systick)
-    /// passed as a reference. This design avoids moving closures around.
-    pub fn begin<F>(&mut self, restart: bool, now_ms: &F) -> Result<bool, E>
+    // Le Result retourne maintenant DriverError<RxErr, TxErr>
+    pub fn begin<F>(&mut self, restart: bool, now_ms: &F) -> Result<bool, DriverError<RxErr, TxErr>>
     where
         F: Fn() -> u32,
     {
+        let _ = self.power.set_low();
+        let _ = self.reset.set_low();
+
         if restart {
-            // toggle reset quickly (like the original attempted)
-            let _ = self.reset.set_low();
-            let t0 = now_ms();
-            while now_ms().wrapping_sub(t0) < RESET_PULSE_MS {}
-            let _ = self.reset.set_high();
-            let t1 = now_ms();
-            while now_ms().wrapping_sub(t1) < RESET_PULSE_MS {}
+            self.shutdown(now_ms)?;
         }
 
-        // detect power via vint_pin if present
-        let powered = match &self.vint_pin {
-            Some(v) => match v.is_high() {
-                Ok(high) => high,
-                Err(_) => false,
-            },
-            None => false,
+        let is_powered = if let Some(vint) = &self.vint_pin {
+            vint.is_high().unwrap_or(false)
+        } else {
+            false
         };
 
-        if !powered {
-            // pulse power pin (active HIGH) per datasheet >=150ms
+        if !is_powered {
             let _ = self.power.set_high();
-            let t0 = now_ms();
-            while now_ms().wrapping_sub(t0) < POWER_ON_PULSE_MS {}
+            self.blocking_wait(POWER_ON_PULSE_MS, now_ms);
             let _ = self.power.set_low();
-            // small settle
-            let t1 = now_ms();
-            while now_ms().wrapping_sub(t1) < SHORT_WAIT_MS {}
-        } else {
-            // debounce / settle if already powered
-            let t = now_ms();
-            while now_ms().wrapping_sub(t) < MODEM_MIN_RESPONSE_OR_URC_WAIT_MS {}
+            self.blocking_wait(SHORT_WAIT_MS, now_ms);
         }
 
-        // wait modem boot
-        let tboot = now_ms();
-        while now_ms().wrapping_sub(tboot) < BOOT_DELAY_MS {}
-
-        // basic autosense: send AT + wait OK
-        self.send("AT", now_ms)?;
-
-        match self.wait_for_response_blocking(1000, now_ms)? {
-            ModemReady::Ok => Ok(true),
-            _ => {
-                // retry once quickly
-                let t_retry = now_ms();
-                while now_ms().wrapping_sub(t_retry) < SHORT_WAIT_MS {}
-                self.send("AT", now_ms)?;
-                if let ModemReady::Ok = self.wait_for_response_blocking(1000, now_ms)? {
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
+        if self.autosense(now_ms)? {
+            return Ok(true);
         }
+
+        Ok(false)
     }
 
-    /// Shutdown issues an AT+CPWROFF and waits. Note: we cannot toggle a VINT
-    /// if it's typed as InputPin. If you need to actively drive VINT,
-    /// make that a separate OutputPin generic.
-    pub fn shutdown<F>(&mut self, now_ms: &F) -> Result<bool, E>
+    pub fn shutdown<F>(&mut self, now_ms: &F) -> Result<bool, DriverError<RxErr, TxErr>>
     where
         F: Fn() -> u32,
     {
-        self.send("AT+CPWROFF", now_ms)?;
-
-        match self.wait_for_response_blocking(40_000, now_ms)? {
-            ModemReady::Ok => {
-                // We can't set vint_pin low because it is InputPin in this signature.
-                // If you need to actively drive VINT, change VINT bound to OutputPin or add separate control pin.
-                Ok(true)
+        if self.autosense_timeout(200, now_ms)? {
+            self.send("AT+CPWROFF", now_ms)?;
+            if let Ok(ModemReady::Ok) = self.wait_for_response(40_000, now_ms) {
+                return Ok(true);
             }
-            _ => Ok(false),
         }
+        Ok(false)
     }
 
-    /// send an AT-like line (appends CRLF). now_ms passed by reference.
-    pub fn send<F>(&mut self, s: &str, now_ms: &F) -> Result<(), E>
+    pub fn end<F>(&mut self, now_ms: &F)
     where
         F: Fn() -> u32,
     {
-        // enforce minimum inter-command gap by busy-wait (caller could also sleep)
-        let delta = now_ms().wrapping_sub(self.last_response_or_urc_ms);
-        if delta < MODEM_MIN_RESPONSE_OR_URC_WAIT_MS {
-            let wait = MODEM_MIN_RESPONSE_OR_URC_WAIT_MS - delta;
-            let t0 = now_ms();
-            while now_ms().wrapping_sub(t0) < wait {}
-        }
+        let _ = self.power.set_high();
+        self.blocking_wait(POWER_OFF_PULSE_MS, now_ms);
+        let _ = self.power.set_low();
+    }
 
-        for &b in s.as_bytes() {
-            nb::block!(self.uart.write(b))?;
-        }
-        nb::block!(self.uart.write(b'\r'))?;
-        nb::block!(self.uart.write(b'\n'))?;
+    pub fn hard_reset<F>(&mut self, now_ms: &F)
+    where
+        F: Fn() -> u32,
+    {
+        let _ = self.reset.set_high();
+        self.blocking_wait(RESET_PULSE_MS, now_ms);
+        let _ = self.reset.set_low();
+    }
 
-        // Reset state machine to expect response
-        self.state = ModemState::Idle;
-        self.ready = ModemReady::NotReady;
+    pub fn send<F>(&mut self, command: &str, now_ms: &F) -> Result<(), DriverError<RxErr, TxErr>>
+    where
+        F: Fn() -> u32,
+    {
+        self.prepare_send(now_ms);
+        self.write_raw(command.as_bytes())?;
+        self.write_raw(b"\r\n")?;
         Ok(())
     }
 
-    /// write binary and discard echoed bytes up to `data.len()`
-    pub fn write_and_discard_echo<F>(&mut self, data: &[u8], _now_ms: &F) -> Result<(), E>
+    pub fn send_fmt<F>(
+        &mut self,
+        args: fmt::Arguments,
+        now_ms: &F,
+    ) -> Result<(), DriverError<RxErr, TxErr>>
     where
         F: Fn() -> u32,
     {
-        let mut written = 0usize;
+        self.prepare_send(now_ms);
+        let mut temp_buf = String::<128>::new();
+        if temp_buf.write_fmt(args).is_ok() {
+            self.write_raw(temp_buf.as_bytes())?;
+            self.write_raw(b"\r\n")?;
+        }
+        Ok(())
+    }
+
+    fn prepare_send<F>(&mut self, now_ms: &F)
+    where
+        F: Fn() -> u32,
+    {
+        let delta = now_ms().wrapping_sub(self.last_response_or_urc_ms);
+        if delta < MODEM_MIN_RESPONSE_OR_URC_WAIT_MS {
+            self.blocking_wait(MODEM_MIN_RESPONSE_OR_URC_WAIT_MS - delta, now_ms);
+        }
+        self.buf.clear();
+        self.state = ModemState::Idle;
+        self.ready = ModemReady::NotReady;
+    }
+
+    // Cette fonction écrit (Tx) ET lit (Rx) pour l'écho, donc elle utilise DriverError
+    fn write_raw(&mut self, data: &[u8]) -> Result<(), DriverError<RxErr, TxErr>> {
+        let mut written = 0;
         for &b in data {
-            nb::block!(self.uart.write(b))?;
+            // Mappe l'erreur d'écriture vers DriverError::Tx
+            nb::block!(self.uart.write(b)).map_err(DriverError::Tx)?;
             written += 1;
         }
 
-        // read and discard up to `written` echoed bytes
-        let mut ignored = 0usize;
-        loop {
+        let mut ignored = 0;
+        while ignored < written {
             match self.uart.read() {
-                Ok(_) => {
-                    ignored += 1;
-                    if ignored >= written {
-                        break;
-                    }
-                }
-                Err(NbError::WouldBlock) => break,
-                Err(NbError::Other(e)) => return Err(e),
+                Ok(_) => ignored += 1,
+                Err(nb::Error::WouldBlock) => break,
+                // Mappe l'erreur de lecture vers DriverError::Rx
+                Err(nb::Error::Other(e)) => return Err(DriverError::Rx(e)),
             }
         }
         Ok(())
     }
 
-    /// poll must be called frequently from your main loop/RTIC task.
-    /// It consumes available bytes and updates `ready` and `buf`.
-    pub fn poll<F>(&mut self, now_ms: &F) -> Result<(), E>
+    pub fn autosense<F>(&mut self, now_ms: &F) -> Result<bool, DriverError<RxErr, TxErr>>
     where
         F: Fn() -> u32,
     {
-        loop {
-            match self.uart.read() {
-                Ok(b) => {
-                    // AT responses are ASCII — casting byte->char is okay here.
-                    if self.buf.push(b as char).is_err() {
-                        // overflow action: clear buffer and continue (policy choice)
-                        self.buf.clear();
-                    }
-
-                    match self.state {
-                        ModemState::Idle => {
-                            // detect command echo start (very simplistic)
-                            if self.buf.starts_with("AT") && self.buf.ends_with("\r\n") {
-                                self.state = ModemState::ReceivingResponse;
-                                self.buf.clear();
-                            } else if self.buf.ends_with("\r\n") {
-                                // URC line — call URC handlers here (not implemented)
-                                // Example: handle_urc(self.buf.trim());
-                                self.last_response_or_urc_ms = now_ms();
-                                self.buf.clear();
-                            }
-                        }
-
-                        ModemState::ReceivingResponse => {
-                            if b == b'\n' {
-                                self.last_response_or_urc_ms = now_ms();
-
-                                if self.buf.ends_with("OK\r\n") {
-                                    self.ready = ModemReady::Ok;
-                                } else if self.buf.ends_with("ERROR\r\n") {
-                                    self.ready = ModemReady::Error;
-                                } else if self.buf.ends_with("NO CARRIER\r\n") {
-                                    self.ready = ModemReady::NoCarrier;
-                                } else if self.buf.contains("CME ERROR") {
-                                    self.ready = ModemReady::CmeError;
-                                }
-
-                                if self.ready != ModemReady::NotReady {
-                                    self.state = ModemState::Idle;
-                                    self.buf.clear();
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Err(NbError::WouldBlock) => break,
-                Err(NbError::Other(e)) => return Err(e),
-            }
-        }
-
-        Ok(())
+        self.autosense_timeout(10000, now_ms)
     }
 
-    /// Blocking wait that repeatedly calls poll until a terminal response or timeout.
-    pub fn wait_for_response_blocking<F>(
+    pub fn autosense_timeout<F>(
         &mut self,
         timeout_ms: u32,
         now_ms: &F,
-    ) -> Result<ModemReady, E>
+    ) -> Result<bool, DriverError<RxErr, TxErr>>
+    where
+        F: Fn() -> u32,
+    {
+        let start = now_ms();
+        while now_ms().wrapping_sub(start) < timeout_ms {
+            self.send("AT", now_ms)?;
+            if let Ok(ModemReady::Ok) = self.wait_for_response(200, now_ms) {
+                return Ok(true);
+            }
+            self.blocking_wait(100, now_ms);
+        }
+        Ok(false)
+    }
+
+    pub fn wait_for_response<F>(
+        &mut self,
+        timeout_ms: u32,
+        now_ms: &F,
+    ) -> Result<ModemReady, DriverError<RxErr, TxErr>>
     where
         F: Fn() -> u32,
     {
@@ -279,13 +238,81 @@ where
         Ok(ModemReady::NotReady)
     }
 
-    /// Utility to issue a hard hardware reset (use only in emergency).
-    pub fn hard_reset(&mut self) -> Result<(), E> {
-        let _ = self.reset.set_low();
-        // blocking long low pulse per datasheet
-        // caller must provide their own delay function if needed (not included here)
-        // This example uses a busy-wait placeholder: user should adapt to their HAL.
-        // For safety we don't spin here since we don't have `now_ms` — caller can implement.
+    // poll ne fait que lire, mais pour uniformiser l'API, on garde DriverError
+    pub fn poll<F>(&mut self, now_ms: &F) -> Result<(), DriverError<RxErr, TxErr>>
+    where
+        F: Fn() -> u32,
+    {
+        loop {
+            match self.uart.read() {
+                Ok(byte) => {
+                    let c = byte as char;
+                    if self.buf.len() < self.buf.capacity() {
+                        let _ = self.buf.push(c);
+                    }
+
+                    match self.state {
+                        ModemState::Idle => {
+                            if self.buf.ends_with("\r\n") {
+                                let trimmed = self.buf.trim();
+                                if trimmed.len() > 0 {
+                                    self.last_response_or_urc_ms = now_ms();
+
+                                    if trimmed == "AT" {
+                                        self.state = ModemState::ReceivingResponse;
+                                        self.buf.clear();
+                                    } else {
+                                        // URC traité (ignoré pour l'instant)
+                                        self.buf.clear();
+                                    }
+                                } else {
+                                    self.buf.clear();
+                                }
+
+                                if self.buf.starts_with("AT") && self.buf.contains("\r\n") {
+                                    self.state = ModemState::ReceivingResponse;
+                                }
+                            }
+                        }
+                        ModemState::ReceivingResponse => {
+                            if c == '\n' {
+                                self.last_response_or_urc_ms = now_ms();
+
+                                let is_ok = self.buf.ends_with("OK\r\n");
+                                let is_err = self.buf.ends_with("ERROR\r\n");
+                                let is_no_carrier = self.buf.ends_with("NO CARRIER\r\n");
+                                let is_cme = self.buf.contains("CME ERROR");
+
+                                if is_ok {
+                                    self.ready = ModemReady::Ok;
+                                } else if is_err {
+                                    self.ready = ModemReady::Error;
+                                } else if is_no_carrier {
+                                    self.ready = ModemReady::NoCarrier;
+                                } else if is_cme {
+                                    self.ready = ModemReady::CmeError;
+                                }
+
+                                if self.ready != ModemReady::NotReady {
+                                    self.state = ModemState::Idle;
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(nb::Error::WouldBlock) => break,
+                Err(nb::Error::Other(e)) => return Err(DriverError::Rx(e)),
+            }
+        }
         Ok(())
+    }
+
+    fn blocking_wait<F>(&self, ms: u32, now_ms: &F)
+    where
+        F: Fn() -> u32,
+    {
+        let start = now_ms();
+        while now_ms().wrapping_sub(start) < ms {}
     }
 }
