@@ -1,11 +1,14 @@
 use core::u8;
 
-use crate::can_exocet;
 use crate::can_exocet::enums::{DataSubtype, FrameType, PingSubtype, ProcedureSubtype, StateSubtype};
 
 use super::enums::{Subsystem, Priority};
 use super::errors::CanError;
 use embassy_stm32::can::{self, Can, Timestamp, Frame};
+
+pub mod dbc_gen {
+    include!(concat!(env!("OUT_DIR"), "/dbc_gen.rs"));
+}
 
 const VALID_ADDRESSES: [u8; 8] = [0x00, 0xFF, 0x08, 0x10, 0x18, 0x20, 0x28, 0x29];
 

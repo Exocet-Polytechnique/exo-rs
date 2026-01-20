@@ -115,7 +115,7 @@ async fn state_machine(_spawner: Spawner, pin_a8: PA8, pin_a6: PA6, pin_a7: PA7,
                 led_r.set_low(); 
 
                 loop{
-                    let (frame, ts) = can_driver.read_message().await.unwrap();
+                    let (_frame, ts) = can_driver.read_message().await.unwrap();
                     info!("Frame received at time: {:?}", ts);
                 }
             }
