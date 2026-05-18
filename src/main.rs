@@ -147,6 +147,8 @@ async fn state_machine(
                                 break;
                             }   else {
                                 error!("Received unrelated CAN frame with ID: {}", id);
+                                state = State::Fault; 
+                                break;
                             }
                         }
                         Err(_err) => error!("Error in frame"),
