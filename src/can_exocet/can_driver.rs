@@ -38,9 +38,7 @@ impl<'a> CanDriver<'a> {
         let local_bit = (frame.local_priority as u16 & 0b1) << 3;
         let module_bits = frame.module & 0b111;
 
-        let id= priority_bits | subsystem_bits | local_bit | module_bits as u16;
-
-        let can_frame = can::frame::Frame::new_standard(id, &frame.payload).unwrap();
+        let can_frame = can::frame::Frame::new_standard(dbc_gen::Nci::MESSAGE_ID as u16, &frame.payload).unwrap();
         _ = self.can.write(&can_frame).await;
 
         if let Some(_dropped_frame) = self.can.write(&can_frame).await {
