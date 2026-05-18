@@ -57,14 +57,20 @@ async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(config);
 
     spawner
-        .spawn(state_machine(
+        .spawn(cockpit(
             spawner, p.PA8, p.PA6, p.PA7, p.PB13, p.PB11, p.FDCAN1, p.PA11, p.PA12,
         ))
         .unwrap(); // Tâche: Machine à états
+
+    // spawner
+    //     .spawn(sender(
+    //         p.FDCAN1, p.PA11, p.PA12,
+    //     ))
+    //     .unwrap(); // Tâche: Envoi périodique de trames CAN pour tests
 }
 
 #[embassy_executor::task]
-async fn state_machine(
+async fn cockpit(
     _spawner: Spawner,
     pin_a8: PA8,
     pin_a6: PA6,
@@ -81,8 +87,8 @@ async fn state_machine(
     let mut led_y = Output::new(pin_a6, Level::Low, Speed::Low); //Yellow LED
     let mut led_r = Output::new(pin_a7, Level::Low, Speed::Low); //Red LED
 
-    let button_g = Input::new(pin_b13, Pull::Up); //Green Button
-    let button_r = Input::new(pin_b11, Pull::Up); //Red Button
+    let button_g = Input::new(pin_b13, Pull::Down); //Green Button
+    let button_r = Input::new(pin_b11, Pull::Down); //Red Button
 
     let mut can = can::CanConfigurator::new(pin_fdcan1, pin_a11, pin_a12, Irqs);
     can.set_bitrate(250_000);
@@ -101,7 +107,7 @@ async fn state_machine(
                 led_g.set_low();
                 led_y.set_low();
 
-                if button_g.is_low() {
+                if button_g.is_high() {
                     state = State::Starting;
                 }
 
@@ -131,7 +137,7 @@ async fn state_machine(
                     }
                 };
 
-                can.write(&Frame::new_standard(dbc_gen::Nci::MESSAGE_ID as u16, frame.raw()).unwrap()).await;
+                // can.write(&Frame::new_standard(dbc_gen::Nci::MESSAGE_ID as u16, frame.raw()).unwrap()).await;
 
                 loop {
                     match can.read().await {
@@ -140,7 +146,7 @@ async fn state_machine(
                                 embedded_can::Id::Standard(id) => id.as_raw() as u32,
                                 _ => continue,
                             };
-                            if id == dbc_gen::Ntd::MESSAGE_ID { // Assuming the response comes from the Telemetry module in this example
+                            if id == dbc_gen::Nti::MESSAGE_ID { // Assuming the response comes from the Telemetry module in this example
                                 error!("Received valve verification response");
                                 state = State::Active;
                                 // Other verifications to come
@@ -158,11 +164,11 @@ async fn state_machine(
             }
             State::Active => {
                 info!("Active Mode");
-                led_g.set_high();
+                led_g.set_low();
                 led_y.set_low();
-                led_r.set_low();
+                led_r.set_high();
 
-                if button_r.is_low() {
+                if button_r.is_high() {
                     state = State::Shutdown;
                 }
 
@@ -186,6 +192,43 @@ async fn state_machine(
         }
     }
 }
+
+#[embassy_executor::task]
+async fn sender(
+    pin_fdcan1: FDCAN1,
+    pin_a11: PA11,
+    pin_a12: PA12,
+) {
+    info!("Démarrage du système...");
+
+    let mut can = can::CanConfigurator::new(pin_fdcan1, pin_a11, pin_a12, Irqs);
+    can.set_bitrate(250_000);
+    let mut can: can::Can<'_> = can.start(can::OperatingMode::NormalOperationMode);
+
+    loop {
+        let frame = match dbc_gen::Nti::new(
+            Module::Dashboard as u8,
+            Module::Cockpit as u8,
+            Instructions::ValveVerification as u32,
+        ) {
+            Ok(f) => f,
+            Err(_e) => {
+                info!("Failed to create CAN frame");
+                Timer::after_millis(500).await; // still yield before retrying
+                continue;
+            }
+        };
+
+        match Frame::new_standard(dbc_gen::Nci::MESSAGE_ID as u16, frame.raw()) {
+            Ok(f)  => { can.write(&f).await; }
+            Err(e) => { error!("Invalid frame: {:?}", e); }
+        }
+
+        Timer::after_millis(500).await;
+    }
+}
+
+
 
 #[repr(u8)]
 enum Module {
