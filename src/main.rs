@@ -56,17 +56,17 @@ async fn main(spawner: Spawner) {
 
     let p = embassy_stm32::init(config);
 
-    spawner
-        .spawn(cockpit(
-            spawner, p.PA8, p.PA6, p.PA7, p.PB13, p.PB11, p.FDCAN1, p.PA11, p.PA12,
-        ))
-        .unwrap(); // Tâche: Machine à états
-
     // spawner
-    //     .spawn(sender(
-    //         p.FDCAN1, p.PA11, p.PA12,
+    //     .spawn(cockpit(
+    //         spawner, p.PA8, p.PA6, p.PA7, p.PB13, p.PB11, p.FDCAN1, p.PA11, p.PA12,
     //     ))
-    //     .unwrap(); // Tâche: Envoi périodique de trames CAN pour tests
+    //     .unwrap(); // Tâche: Machine à états
+
+    spawner
+        .spawn(sender(
+            p.FDCAN1, p.PA11, p.PA12,
+        ))
+        .unwrap(); // Tâche: Envoi périodique de trames CAN pour tests
 }
 
 #[embassy_executor::task]
@@ -103,7 +103,7 @@ async fn cockpit(
         match state {
             State::Idle => {
                 info!("Idle Mode");
-                
+
                 led_g.set_low();
                 led_y.set_low();
 
@@ -125,42 +125,39 @@ async fn cockpit(
                 led_g.set_low();
                 led_r.set_low();
 
-                let frame = match dbc_gen::Nci::new(
-                    Module::Dashboard as u8,
-                    Module::Cockpit as u8,
-                    Instructions::ValveVerification as u32,
-                ) {
-                    Ok(f) => f,
-                    Err(_) => {
-                        error!("Failed to create CAN frame");
-                        return;
-                    }
-                };
+                // let frame = match dbc_gen::Nci::new(
+                //     Module::Dashboard as u8,
+                //     Module::Cockpit as u8,
+                //     Instructions::ValveVerification as u32,
+                // ) {
+                //     Ok(f) => f,
+                //     Err(_) => {
+                //         error!("Failed to create CAN frame");
+                //         return;
+                //     }
+                // };
 
                 // can.write(&Frame::new_standard(dbc_gen::Nci::MESSAGE_ID as u16, frame.raw()).unwrap()).await;
 
-                loop {
-                    match can.read().await {
-                        Ok(envelope) => {
-                            let id: u32 = match envelope.frame.id() {
-                                embedded_can::Id::Standard(id) => id.as_raw() as u32,
-                                _ => continue,
-                            };
-                            if id == dbc_gen::Nti::MESSAGE_ID { // Assuming the response comes from the Telemetry module in this example
-                                error!("Received valve verification response");
-                                state = State::Active;
-                                // Other verifications to come
-                                break;
-                            }   else {
-                                error!("Received unrelated CAN frame with ID: {}", id);
-                                state = State::Fault; 
-                                break;
+                match can.read().await {
+                    Ok(envelope) => {
+                        let id: u32 = match envelope.frame.id() {
+                            embedded_can::Id::Standard(id) => id.as_raw() as u32,
+                            _ => {
+                                warn!("Non-standard frame, ignoring");
+                                0 // dummy value that won't match any MESSAGE_ID
                             }
+                        };
+                        if id == dbc_gen::Nci::MESSAGE_ID {
+                            info!("Received valve verification response");
+                            state = State::Active;
+                        } else {
+                            warn!("Ignoring unrelated frame ID: {}", id);
+                            state = State::Fault; // Transition to fault on unexpected frame
                         }
-                        Err(_err) => error!("Error in frame"),
                     }
+                    Err(_err) => error!("Error reading frame"),
                 }
-                
             }
             State::Active => {
                 info!("Active Mode");
@@ -194,11 +191,7 @@ async fn cockpit(
 }
 
 #[embassy_executor::task]
-async fn sender(
-    pin_fdcan1: FDCAN1,
-    pin_a11: PA11,
-    pin_a12: PA12,
-) {
+async fn sender(pin_fdcan1: FDCAN1, pin_a11: PA11, pin_a12: PA12) {
     info!("Démarrage du système...");
 
     let mut can = can::CanConfigurator::new(pin_fdcan1, pin_a11, pin_a12, Irqs);
@@ -206,7 +199,7 @@ async fn sender(
     let mut can: can::Can<'_> = can.start(can::OperatingMode::NormalOperationMode);
 
     loop {
-        let frame = match dbc_gen::Nti::new(
+        let frame = match dbc_gen::Nci::new(
             Module::Dashboard as u8,
             Module::Cockpit as u8,
             Instructions::ValveVerification as u32,
@@ -214,21 +207,24 @@ async fn sender(
             Ok(f) => f,
             Err(_e) => {
                 info!("Failed to create CAN frame");
-                Timer::after_millis(500).await; // still yield before retrying
+                Timer::after_millis(1000).await; // still yield before retrying
                 continue;
             }
         };
 
         match Frame::new_standard(dbc_gen::Nci::MESSAGE_ID as u16, frame.raw()) {
-            Ok(f)  => { can.write(&f).await; }
-            Err(e) => { error!("Invalid frame: {:?}", e); }
+            Ok(f) => {
+                can.write(&f).await;
+                info!("Can frame sent with ID: {}", dbc_gen::Nci::MESSAGE_ID);
+            }
+            Err(e) => {
+                info!("Invalid frame: {:?}", e);
+            }
         }
 
-        Timer::after_millis(500).await;
+        Timer::after_millis(3000).await;
     }
 }
-
-
 
 #[repr(u8)]
 enum Module {
@@ -239,7 +235,7 @@ enum Module {
     HighPower = 0b0011,
     Dashboard = 0b0100,
     Telemetry = 0b0101,
-}// Will need to update the DBC to add the missing modules
+} // Will need to update the DBC to add the missing modules
 
 #[repr(u32)]
 enum Instructions {
