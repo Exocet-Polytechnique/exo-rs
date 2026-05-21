@@ -35,7 +35,7 @@ fn get_device_config() -> Config {
 async fn main(_spawner: Spawner) {
     let p = embassy_stm32::init(get_device_config());
 
-    let mut bus = OneWireBus::init(p.PC3);
+    let mut bus = OneWireBus::init(p.PA10);
 
     let address = bus.read_rom().await.unwrap();
     info!("Device with address: 0x{:014x} found!", address);
@@ -56,6 +56,6 @@ async fn main(_spawner: Spawner) {
             Err(e) => info!("Failed to read temperature: {}", e),
             Ok(temperature) => info!("Temperature: {} C", temperature),
         }
-        //Timer::after_millis(1000).await;
+        Timer::after_millis(1000).await;
     }
 }
