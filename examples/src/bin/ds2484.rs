@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use defmt::{info, warn, error, debug};
+use defmt::{info};
 use embassy_executor::Spawner;
 use embassy_time::Timer;
 use embassy_stm32::{
@@ -73,13 +73,16 @@ async fn main(_spawner: Spawner) -> ! {
 
     let mut sensor = DS18B20::new(Some(address));
 
-        sensor
-        .ensure_config(
-            &mut bus,
-            ds18b20::Config::new(ds18b20::Resolution::NineBits),
-        )
-        .await
-        .unwrap();
+    match sensor.ensure_config(
+        &mut bus,
+        ds18b20::Config::new(ds18b20::Resolution::TwelveBits),
+    ).await {
+        Ok(())  => defmt::info!("config set"),
+        Err(e)  => panic!("ensure_config failed: {:?}", e),
+    }
+
+    // give the 1-Wire bus time to recover after read_rom
+    Timer::after_millis(100).await;
 
     loop {
         match sensor.read_temperature(&mut bus).await {

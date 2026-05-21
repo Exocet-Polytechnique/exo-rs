@@ -4,6 +4,7 @@ use embassy_stm32::{
     i2c::{self, I2c},
     mode::Async
 };
+use embassy_time::Timer;
 
 const DS2484_ADDR: u8 = 0x18;   
 
@@ -52,9 +53,10 @@ impl DS2484 {
     /// Send a reset pulse and check if a device responds
     async fn reset_and_detect(&mut self) -> Result<(), Error> {
         // Send 1-Wire Reset command to DS2484 over I2C
-        self.i2c
-            .write(DS2484_ADDR, &[COMMAND_1WIRE_RESET])
-            .await?;
+        self.i2c.write(DS2484_ADDR, &[COMMAND_1WIRE_RESET]).await?;
+
+        // give DS2484 time to start the reset sequence before polling
+        Timer::after_micros(500).await;
 
         // Wait for DS2484 to complete the reset sequence
         self.wait_1wire_idle().await?;
@@ -76,6 +78,7 @@ impl DS2484 {
         }
     }
 
+    // Check if the 1-wire bus is idle (unused)
     async fn is_1wire_free(&mut self) -> Result<bool, Error> {
         let set_pointer: [u8; 2] = [COMMAND_SRP, COMMAND_STATUS_REG];
         let mut status: [u8; 1] = [0u8; 1];
@@ -85,12 +88,13 @@ impl DS2484 {
         Ok(is_free)
     }
 
+    // Wait until the 1-wire bus is idle (unused)
     async fn wait_1wire_idle(&mut self) -> Result<(), Error> {
         loop {
             if self.is_1wire_free().await? {
                 return Ok(())
             }
-            embassy_time::Timer::after_micros(50).await;
+            embassy_time::Timer::after_micros(100).await;
         }
     }
 
@@ -98,11 +102,13 @@ impl DS2484 {
     async fn write_byte(&mut self, byte: u8) -> Result<(), Error> {
         self.wait_1wire_idle().await?;
         self.i2c.write(DS2484_ADDR, &[COMMAND_1WWB, byte]).await?;
+        Timer::after_micros(100).await; // give DS2484 time to start transmitting
         Ok(())
     }
 
     /// Read a byte from the 1-wire bus
     async fn read_byte(&mut self) -> Result<u8, Error> {
+        self.wait_1wire_idle().await?;
         self.i2c.write(DS2484_ADDR, &[COMMAND_1WRB]).await?;
         self.wait_1wire_idle().await?;
         let set_pointer: [u8; 2] = [COMMAND_SRP, COMMAND_READ_DATA_REG];
@@ -123,19 +129,21 @@ impl DS2484 {
         self.reset_and_detect().await?;
         self.send_rom_command(RomCommand::ReadRom).await?;
 
-        // the first 7 bytes make up the address
-        let mut address: u64 = 0;
-        for i in 0..7 {
-            let data = self.read_byte().await?;
-            address |= (data as u64) << (i * 8);
+        let mut rom = [0u8; 8];
+        for i in 0..8 {  // 8 bytes total (7 address + 1 CRC)
+            rom[i] = self.read_byte().await?;
         }
 
-        // and the last byte is the crc-8 code
-        let received_crc = self.read_byte().await?;
-        let calculated_crc =
-            crc::Crc::<u8>::new(&CRC_8_MAXIM_DOW).checksum(&address.to_le_bytes()[..7]);
-        if received_crc != calculated_crc {
+        // CRC is calculated over first 7 bytes
+        let calculated_crc = crc::Crc::<u8>::new(&CRC_8_MAXIM_DOW)
+            .checksum(&rom[..7]);  // check against rom[..7]
+        if rom[7] != calculated_crc {
             return Err(Error::InvalidCrc);
+        }
+
+        let mut address: u64 = 0;
+        for i in 0..8 { // changed to 8 bytes (including CRC)
+            address |= (rom[i] as u64) << (i * 8);
         }
 
         Ok(address)
@@ -146,13 +154,9 @@ impl DS2484 {
         self.reset_and_detect().await?;
         if let Some(address) = address {
             self.send_rom_command(RomCommand::MatchRom).await?;
-            for i in 0..7 {
+            for i in 0..8 {
                 self.write_byte(((address >> (i * 8)) & 0xFF) as u8).await?;
             }
-
-            self.write_byte(
-                crc::Crc::<u8>::new(&CRC_8_MAXIM_DOW).checksum(&address.to_le_bytes()[..7]),
-            ).await?;
         } else {
             self.send_rom_command(RomCommand::SkipRom).await?;
         }
