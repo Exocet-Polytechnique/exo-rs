@@ -39,12 +39,12 @@ async fn main(spawner: Spawner) {
     {
         use embassy_stm32::rcc::*;
         config.rcc.hse = Some(Hse {
-            freq: Hertz(24_000_000),
+            freq: Hertz(8_000_000),
             mode: HseMode::Oscillator,
         });
         config.rcc.pll = Some(Pll {
             source: PllSource::HSE,
-            prediv: PllPreDiv::DIV6,
+            prediv: PllPreDiv::DIV2,
             mul: PllMul::MUL85,
             divp: None,
             divq: Some(PllQDiv::DIV8), // 42.5 Mhz for fdcan.
@@ -67,6 +67,10 @@ async fn main(spawner: Spawner) {
             p.FDCAN1, p.PA11, p.PA12,
         ))
         .unwrap(); // Tâche: Envoi périodique de trames CAN pour tests
+
+    loop {
+        Timer::after_millis(1000).await;
+    }
 }
 
 #[embassy_executor::task]
@@ -199,10 +203,12 @@ async fn sender(pin_fdcan1: FDCAN1, pin_a11: PA11, pin_a12: PA12) {
     let mut can: can::Can<'_> = can.start(can::OperatingMode::NormalOperationMode);
 
     loop {
-        let frame = match dbc_gen::Nci::new(
-            Module::Dashboard as u8,
+        let frame = match dbc_gen::FrameP1d::new(
             Module::Cockpit as u8,
-            Instructions::ValveVerification as u32,
+            Module::Dashboard as u8,
+             1 as u8, 
+             20 as u64, 
+
         ) {
             Ok(f) => f,
             Err(_e) => {
@@ -212,10 +218,10 @@ async fn sender(pin_fdcan1: FDCAN1, pin_a11: PA11, pin_a12: PA12) {
             }
         };
 
-        match Frame::new_standard(dbc_gen::Nci::MESSAGE_ID as u16, frame.raw()) {
+        match Frame::new_standard(dbc_gen::FrameP1d::MESSAGE_ID as u16, frame.raw()) {
             Ok(f) => {
                 can.write(&f).await;
-                info!("Can frame sent with ID: {}", dbc_gen::Nci::MESSAGE_ID);
+                info!("Can frame sent with ID: {}", dbc_gen::FrameP1d::MESSAGE_ID);
             }
             Err(e) => {
                 info!("Invalid frame: {:?}", e);
