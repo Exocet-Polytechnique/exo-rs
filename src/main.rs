@@ -206,8 +206,8 @@ async fn sender(pin_fdcan1: FDCAN1, pin_a11: PA11, pin_a12: PA12) {
         let frame = match dbc_gen::FrameP1d::new(
             Module::Cockpit as u8,
             Module::Dashboard as u8,
-             1 as u8, 
-             20 as u64, 
+             DataType::Temperature as u8,
+             25 as u64, 
 
         ) {
             Ok(f) => f,
@@ -248,4 +248,14 @@ enum Instructions {
     NoInstruction = 0,
     ValveVerification = 1,
     ValveCalibration = 2,
+}
+
+#[repr(u8)]
+enum DataType {
+    Speed = 0x01,
+    HydrogenLevel = 0x02,
+    Voltage = 0x10,
+    Current = 0x11,
+    Temperature = 0x12,
+    
 }
