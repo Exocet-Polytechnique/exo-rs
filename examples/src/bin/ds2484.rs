@@ -7,6 +7,7 @@ use embassy_time::Timer;
 use embassy_stm32::{
     Config,
     i2c::{self, I2c, Config as I2cConfig},
+    time::{Hertz},
     bind_interrupts,
     peripherals
 };
@@ -39,8 +40,6 @@ fn get_device_config() -> Config {
 bind_interrupts!(struct Irqs {
     I2C1_EV => i2c::EventInterruptHandler<peripherals::I2C1>;
     I2C1_ER => i2c::ErrorInterruptHandler<peripherals::I2C1>;
-    DMA1_CH6 => embassy_stm32::dma::InterruptHandler<peripherals::DMA1_CH6>;
-    DMA1_CH7 => embassy_stm32::dma::InterruptHandler<peripherals::DMA1_CH7>;
 });
 
 #[embassy_executor::main]

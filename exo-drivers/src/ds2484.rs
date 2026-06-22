@@ -18,8 +18,8 @@ const COMMAND_STATUS_REG: u8 = 0xF0;
 const COMMAND_1WIRE_RESET: u8 = 0xB4;
 const COMMAND_1WT: u8 = 0x78;
 
-pub struct DS2484<'d> {
-    i2c: I2c<'d, Async, Master>,
+pub struct DS2484 {
+    i2c: I2c<'static, Async, Master>,
 }
 
 /// Possible 1-wire ROM commands (network layer)
@@ -46,9 +46,9 @@ impl From<embassy_stm32::i2c::Error> for Error {
     }
 }
 
-impl<'d> DS2484<'d> {
+impl DS2484 {
     /// Constructor
-    pub fn new(i2c: I2c<'d, Async, Master>) -> Self {
+    pub fn new(i2c: I2c<'static, Async, Master>) -> Self {
         Self { i2c }
     }
 
