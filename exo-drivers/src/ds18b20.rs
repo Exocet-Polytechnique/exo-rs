@@ -50,7 +50,7 @@
 use crc::CRC_8_MAXIM_DOW;
 use embassy_time::Timer;
 
-use crate::one_wire_bus::{self, OneWireBus};
+use crate::ds2484::{DS2484, Error};
 
 const BASE_CONFIGURATION_REG: u8 = 0x1F; // see docs
 const CONFIG_RESOLUTION_BITSHIFT: u8 = 5;
@@ -95,18 +95,18 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, defmt::Format)]
-pub enum Error {
-    InvalidCrc,
-    BusError(one_wire_bus::Error),
-    UnexpectedReservedValue,
-}
+// #[derive(Debug, defmt::Format)]
+// pub enum Error {
+//     InvalidCrc,
+//     BusError(one_wire_bus::Error),
+//     UnexpectedReservedValue,
+// }
 
-impl From<one_wire_bus::Error> for Error {
-    fn from(value: one_wire_bus::Error) -> Self {
-        Self::BusError(value)
-    }
-}
+// impl From<one_wire_bus::Error> for Error {
+//     fn from(value: one_wire_bus::Error) -> Self {
+//         Self::BusError(value)
+//     }
+// }
 
 pub struct DS18B20 {
     address: Option<u64>,
@@ -124,7 +124,7 @@ impl DS18B20 {
        }
     }
 
-    async fn read_scratchpad(&mut self, bus: &mut OneWireBus) -> Result<(f32, [u8; 3]), Error> {
+    async fn read_scratchpad(&mut self, bus: &mut DS2484) -> Result<(f32, [u8; 3]), Error> {
         let mut scratchpad_data = [0; 9];
         bus.send_command_read(
             FunctionCommands::ReadScratchpad as u8,
@@ -132,14 +132,14 @@ impl DS18B20 {
             &mut scratchpad_data,
         ).await?;
 
-        // see datasheet
-        if scratchpad_data[5] != 0xFF || scratchpad_data[7] != 0x10 {
-            return Err(Error::UnexpectedReservedValue);
-        }
-
         let calculated_crc = crc::Crc::<u8>::new(&CRC_8_MAXIM_DOW).checksum(&scratchpad_data[..8]);
 
         if scratchpad_data[8] != calculated_crc {
+            return Err(Error::InvalidCrc);
+        }
+
+        if scratchpad_data[8] != calculated_crc {
+            defmt::error!("CRC mismatch: got 0x{:02X} expected 0x{:02X}", scratchpad_data[8], calculated_crc);
             return Err(Error::InvalidCrc);
         }
 
@@ -164,8 +164,11 @@ impl DS18B20 {
 
     /// Write the given configuration on the RAM and persistent memories of the sensor.
     /// Will not write or change the memory if the correct configuration is already loaded.
-    pub async fn ensure_config(&mut self, bus: &mut OneWireBus, config: Config) -> Result<(), Error> {
+    pub async fn ensure_config(&mut self, bus: &mut DS2484, config: Config) -> Result<(), Error> {
         bus.send_command(FunctionCommands::RecallEEPROM as u8, self.address).await?;
+
+        // wait for EEPROM recall to complete
+        Timer::after_millis(10).await;
 
         let config_byte =
             BASE_CONFIGURATION_REG | ((config.resolution as u8) << CONFIG_RESOLUTION_BITSHIFT);
@@ -183,7 +186,14 @@ impl DS18B20 {
             self.address,
             &expected_data,
         ).await?;
+
+        // Wait before copy
+        Timer::after_millis(5).await;
+
         bus.send_command(FunctionCommands::CopyScratchpad as u8, self.address).await?;
+
+        // wait for EEPROM recall to complete
+        Timer::after_millis(10).await;
 
         self.config = Some(config);
 
@@ -196,7 +206,7 @@ impl DS18B20 {
     ///
     /// **Important**: make sure the configuration is set by calling [`Self::ensure_config`] before
     /// calling this method.
-    pub async fn read_temperature(&mut self, bus: &mut OneWireBus) -> Result<f32, Error> {
+    pub async fn read_temperature(&mut self, bus: &mut DS2484) -> Result<f32, Error> {
         bus.send_command(FunctionCommands::Convert as u8, self.address).await?;
         let config = self.config.as_ref().expect("Configuration should be set using `DS18B20::ensure_config(...)` before reading temperature");
 

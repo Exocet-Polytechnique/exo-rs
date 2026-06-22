@@ -11,7 +11,7 @@
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
-use embassy_stm32::{Config, Peri, adc::{Adc, AdcChannel, AnyAdcChannel, SampleTime}, can, gpio::{Input, Level, Output, Speed}, peripherals::{ADC1, ADC2, DMA1_CH1, FDCAN1, PB4, PB5, PB6, PB9, PC1, PC2, PC3, PC6, PC7}};
+use embassy_stm32::{Config, Peri, adc::{Adc, AdcChannel, AnyAdcChannel, SampleTime}, can, gpio::{Input, Level, Output, Speed}, i2c::{self, I2c, Config as I2cConfig}, peripherals::{ADC1, ADC2, DMA1_CH1, FDCAN1, PB4, PB5, PB6, PB9, PC1, PC2, PC3, PC6, PC7}};
 use embassy_sync::{blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex}, channel::Channel, priority_channel::PriorityChannel, signal::Signal, watch::Watch};
 use embassy_time::Timer;
 use embedded_hal::can::{Id, StandardId};
@@ -19,11 +19,22 @@ use heapless::binary_heap::Min;
 use {defmt_rtt as _, panic_probe as _};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::{bind_interrupts, dma, peripherals};
+use exo_drivers::{
+    ds2484::{DS2484},
+    ds18b20::{self, DS18B20}
+};
 
-bind_interrupts!(struct Irqs {
+bind_interrupts!(struct CanIrqs {
     DMA1_CHANNEL1 => dma::InterruptHandler<peripherals::DMA1_CH1>;
     FDCAN1_IT0 => can::IT0InterruptHandler<FDCAN1>;
     FDCAN1_IT1 => can::IT1InterruptHandler<FDCAN1>;
+});
+
+bind_interrupts!(struct I2cIrqs {
+    I2C2_EV => i2c::EventInterruptHandler<peripherals::I2C2>;
+    I2C2_ER => i2c::ErrorInterruptHandler<peripherals::I2C2>;
+    DMA1_CHANNEL6 => dma::InterruptHandler<peripherals::DMA1_CH6>;
+    DMA1_CHANNEL7 => dma::InterruptHandler<peripherals::DMA1_CH7>;
 });
 
 const ADC_MAX: f32 = 3640.0;
@@ -31,6 +42,7 @@ const ADC_MAX: f32 = 3640.0;
 enum SensorData {
     Manometers(f32, f32),
     Actuators(u8, u8, u8),
+    Thermometers(f32, f32, f32),
 }
 
 struct SensorMessage {
@@ -66,10 +78,12 @@ struct ActuatorMessage {
 static MESSAGE_CHANNEL: PriorityChannel<ThreadModeRawMutex, SensorMessage, Min, 5> = PriorityChannel::new();
 static ACTUATOR_CHANNEL: Channel<ThreadModeRawMutex, ActuatorMessage, 5> = Channel::new();
 static MANO_WATCH: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
+static THERMO_WATCH: Watch<CriticalSectionRawMutex, bool, 3> = Watch::new();
 
 const ACTUATOR_COMMAND: u8 = 0x00;
 const ACTUATOR_READ_COMMAND: u8 = 0x01;
 const MANO_READ_COMMAND: u8 = 0x02;
+const THERMO_READ_COMMAND: u8 = 0x03;
 
 #[embassy_executor::task]
 async fn can_task(mut can_bus: can::Can<'static>) {
@@ -90,6 +104,14 @@ async fn can_task(mut can_bus: can::Can<'static>) {
                         let frame = can::frame::Frame::new_standard(0x01, &[ACTUATOR_READ_COMMAND, a1, a2, a3]).unwrap();
                         can_bus.write(&frame).await;
                     }
+                    SensorData::Thermometers(t1,t2 ,t3 ) => {
+                        let t1_int: u16 = (t1 * 1000.0) as u16;
+                        let t2_int: u16 = (t2 * 1000.0) as u16;
+                        let t3_int: u16 = (t3 * 1000.0) as u16;
+
+                        let frame = can::frame::Frame::new_standard(0x01, &[THERMO_READ_COMMAND, ((t1_int >> 8) & 0xFF) as u8, (t1_int & 0xFF) as u8, ((t2_int >> 8) & 0xFF) as u8, (t2_int & 0xFF) as u8, ((t3_int >> 8) & 0xFF) as u8, (t3_int & 0xFF) as u8]).unwrap();
+                        can_bus.write(&frame).await;
+                    }
                 }
             }
             Either::Second(recv_data) => {
@@ -100,10 +122,13 @@ async fn can_task(mut can_bus: can::Can<'static>) {
                                 ACTUATOR_CHANNEL.send(ActuatorMessage { id: envelope.frame.data()[1], status: (envelope.frame.data()[2] == 1) }).await;
                             }
                             ACTUATOR_READ_COMMAND => {
-                                ACTUATOR_CHANNEL.send(ActuatorMessage { id: 3, status: false }).await;
+                                ACTUATOR_CHANNEL.send(ActuatorMessage { id: 4, status: false }).await;
                             }
                             MANO_READ_COMMAND => {
                                 MANO_WATCH.sender().send(envelope.frame.data()[1] == 1);
+                            }
+                            THERMO_READ_COMMAND => {
+                                THERMO_WATCH.sender().send(envelope.frame.data()[1] == 1);
                             }
                             _ => {
                                 info!("Unknown message")
@@ -171,6 +196,8 @@ async fn pressure_task(mut adc1: Adc<'static, ADC1>, mut adc2: Adc<'static, ADC2
 
 #[embassy_executor::task]
 async fn actuator_task(act1: Peri<'static, PC1>, act2: Peri<'static, PC2>, act3: Peri<'static, PC3>, no1: Peri<'static, PB4>, nc1: Peri<'static, PB5>, no2: Peri<'static, PB6>, nc2: Peri<'static, PB9>, no3: Peri<'static, PC6>, nc3: Peri<'static, PC7>) {
+    info!("Starting actuator task");
+
     let read_no1 = Input::new(no1, embassy_stm32::gpio::Pull::None);
     let read_nc1 = Input::new(nc1, embassy_stm32::gpio::Pull::None);
     let read_no2 = Input::new(no2, embassy_stm32::gpio::Pull::None);
@@ -248,6 +275,35 @@ async fn actuator_task(act1: Peri<'static, PC1>, act2: Peri<'static, PC2>, act3:
     }
 }
 
+#[embassy_executor::task]
+async fn temperature_task(mut bus: DS2484, mut sensors: [DS18B20; 3]) {
+    info!("Starting temperature task");
+
+    let mut recv = THERMO_WATCH.receiver().unwrap();
+    let mut temperatures: [f32; 3] = [0.0; 3];
+
+    loop {
+        if recv.get().await {
+
+            for i in 0..3 {
+                match sensors[i].read_temperature(&mut bus).await {
+                    Err(e) => info!("Failed to read temperature: {}", e),
+                    Ok(t) => {
+                        temperatures[i] = t;
+                    }
+                }
+            }
+
+            MESSAGE_CHANNEL.send(SensorMessage{
+                priority: 1,
+                data: SensorData::Thermometers(temperatures[0], temperatures[1], temperatures[2]),
+            }).await;
+
+        }
+        Timer::after_millis(200).await;
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let mut config = Config::default();
@@ -271,7 +327,7 @@ async fn main(spawner: Spawner) {
     }
     let p = embassy_stm32::init(config);
 
-    let mut can_bus = can::CanConfigurator::new(p.FDCAN1, p.PA11, p.PA12, Irqs);
+    let mut can_bus = can::CanConfigurator::new(p.FDCAN1, p.PA11, p.PA12, CanIrqs);
     can_bus.properties().set_extended_filter(can::filter::ExtendedFilterSlot::_0, can::filter::ExtendedFilter::accept_all_into_fifo1());
     can_bus.set_bitrate(250_000);
 
@@ -297,9 +353,44 @@ async fn main(spawner: Spawner) {
     let nc2 = p.PB9;
     let nc3 = p.PC7;
 
+    let i2c = I2c::new(
+        p.I2C2,
+        p.PC4,                      // SCL
+        p.PA8,                      // SDA
+        p.DMA1_CH6,              // TX DMA
+        p.DMA1_CH7,              // RX DMA
+        I2cIrqs,                   // IRQ — moved after DMA
+        I2cConfig::default(),
+    );
+
+    let mut bus = DS2484::new(i2c);
+
+    // TODO: Change Sensors' address with real one
+
+    const SENSOR1: u64 = 0x28FF123456789ABC;
+    const SENSOR2: u64 = 0x28FF9876543210DE;
+    const SENSOR3: u64 = 0x28FF111122223333;
+
+    let mut sensors = [
+        DS18B20::new(Some(SENSOR1)),
+        DS18B20::new(Some(SENSOR2)),
+        DS18B20::new(Some(SENSOR3)),
+    ];
+
+    for i in 0..3 {
+        match sensors[i].ensure_config(
+            &mut bus,
+            ds18b20::Config::new(ds18b20::Resolution::TwelveBits),
+        ).await {
+            Ok(())  => defmt::info!("config set"),
+            Err(e)  => defmt::panic!("ensure_config failed: {:?}", e),
+        }
+    }
+
     spawner.spawn(unwrap!(can_task(can_bus_final)));
     spawner.spawn(unwrap!(pressure_task(adc1, adc2, pa0, pa1)));
     spawner.spawn(unwrap!(actuator_task(act1, act2, act3, no1, nc1, no2, nc2, no3, nc3)));
+    spawner.spawn(unwrap!(temperature_task(bus, sensors)));
 
     loop {
         status_led.toggle();

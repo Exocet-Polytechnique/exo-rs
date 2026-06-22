@@ -24,5 +24,7 @@ heapless = { version = "0.8", default-features = false }
 static_cell = "2.0.0"
 critical-section = "1.1"
 
+exo-drivers = { path = "../exo-drivers/" }
+
 [profile.release]
 debug = 2
