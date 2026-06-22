@@ -18,7 +18,8 @@ use core::result::Result::*;
 use crc::CRC_8_MAXIM_DOW;
 
 use embassy_stm32::{
-    Peripheral,
+    Peri,
+    PeripheralType,
     gpio::{Flex, Pin, Speed},
 };
 
@@ -66,7 +67,7 @@ pub enum Error {
 
 impl OneWireBus {
     /// Create a new 1-wire bus handle
-    pub fn init(pin: impl Peripheral<P = impl Pin> + 'static) -> Self {
+    pub fn init(pin: Peri<'static, impl PeripheralType + Pin>) -> Self {
         let mut gpio = Flex::new(pin);
         gpio.set_as_input_output(Speed::Low);
 

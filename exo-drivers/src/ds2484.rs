@@ -1,7 +1,7 @@
 use crc::CRC_8_MAXIM_DOW;
 
 use embassy_stm32::{
-    i2c::{self, I2c},
+    i2c::{self, I2c, Master},
     mode::Async
 };
 use embassy_time::Timer;
@@ -16,9 +16,10 @@ const COMMAND_SRP: u8 = 0xE1;
 const COMMAND_READ_DATA_REG: u8 = 0xE1;
 const COMMAND_STATUS_REG: u8 = 0xF0;
 const COMMAND_1WIRE_RESET: u8 = 0xB4;
+const COMMAND_1WT: u8 = 0x78;
 
-pub struct DS2484 {
-    i2c: I2c<'static, Async>,
+pub struct DS2484<'d> {
+    i2c: I2c<'d, Async, Master>,
 }
 
 /// Possible 1-wire ROM commands (network layer)
@@ -27,6 +28,7 @@ enum RomCommand {
     ReadRom = 0x33,
     MatchRom = 0x55,
     SkipRom = 0xCC,
+    SearchRom = 0xF0,
 }
 
 /// possible DS2484 bus errors
@@ -44,9 +46,9 @@ impl From<embassy_stm32::i2c::Error> for Error {
     }
 }
 
-impl DS2484 {
+impl<'d> DS2484<'d> {
     /// Constructor
-    pub fn new(i2c: I2c<'static, Async>) -> Self {
+    pub fn new(i2c: I2c<'d, Async, Master>) -> Self {
         Self { i2c }
     }
 
