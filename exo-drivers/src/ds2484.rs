@@ -9,26 +9,26 @@ use embassy_time::Timer;
 const DS2484_ADDR: u8 = 0x18;   
 
 
-// DS2484 Commands
+/// DS2484 Commands
+// These commands come from DS2484 datasheet (https://www.analog.com/media/en/technical-documentation/data-sheets/ds2484.pdf)
 const COMMAND_1WWB: u8 = 0xA5;
 const COMMAND_1WRB: u8 = 0x96;
 const COMMAND_SRP: u8 = 0xE1;
-const COMMAND_READ_DATA_REG: u8 = 0xE1;
-const COMMAND_STATUS_REG: u8 = 0xF0;
+const SRP_READ_DATA_REG: u8 = 0xE1;
+const SRP_STATUS_REG: u8 = 0xF0;
 const COMMAND_1WIRE_RESET: u8 = 0xB4;
-const COMMAND_1WT: u8 = 0x78;
 
 pub struct DS2484 {
     i2c: I2c<'static, Async, Master>,
 }
 
 /// Possible 1-wire ROM commands (network layer)
+// These commands come from DS2484 datasheet (https://www.analog.com/media/en/technical-documentation/data-sheets/ds2484.pdf)
 #[repr(u8)]
 enum RomCommand {
     ReadRom = 0x33,
     MatchRom = 0x55,
     SkipRom = 0xCC,
-    SearchRom = 0xF0,
 }
 
 /// possible DS2484 bus errors
@@ -64,7 +64,7 @@ impl DS2484 {
         self.wait_1wire_idle().await?;
 
         // Read status register to check Presence Pulse Detected (PPD) bit
-        let set_pointer = [COMMAND_SRP, COMMAND_STATUS_REG];
+        let set_pointer = [COMMAND_SRP, SRP_STATUS_REG];
         let mut status = [0u8; 1];
         self.i2c
             .write_read(DS2484_ADDR, &set_pointer, &mut status)
@@ -82,7 +82,7 @@ impl DS2484 {
 
     // Check if the 1-wire bus is idle (unused)
     async fn is_1wire_free(&mut self) -> Result<bool, Error> {
-        let set_pointer: [u8; 2] = [COMMAND_SRP, COMMAND_STATUS_REG];
+        let set_pointer: [u8; 2] = [COMMAND_SRP, SRP_STATUS_REG];
         let mut status: [u8; 1] = [0u8; 1];
         self.i2c.write_read(DS2484_ADDR, &set_pointer, &mut status).await?;
 
@@ -113,7 +113,7 @@ impl DS2484 {
         self.wait_1wire_idle().await?;
         self.i2c.write(DS2484_ADDR, &[COMMAND_1WRB]).await?;
         self.wait_1wire_idle().await?;
-        let set_pointer: [u8; 2] = [COMMAND_SRP, COMMAND_READ_DATA_REG];
+        let set_pointer: [u8; 2] = [COMMAND_SRP, SRP_READ_DATA_REG];
         let mut buffer: [u8; 1] = [0u8; 1];
         self.i2c.write_read(DS2484_ADDR, &set_pointer, &mut buffer).await?;
         Ok(buffer[0])

@@ -95,19 +95,6 @@ impl Default for Config {
     }
 }
 
-// #[derive(Debug, defmt::Format)]
-// pub enum Error {
-//     InvalidCrc,
-//     BusError(one_wire_bus::Error),
-//     UnexpectedReservedValue,
-// }
-
-// impl From<one_wire_bus::Error> for Error {
-//     fn from(value: one_wire_bus::Error) -> Self {
-//         Self::BusError(value)
-//     }
-// }
-
 pub struct DS18B20 {
     address: Option<u64>,
     config: Option<Config>,
