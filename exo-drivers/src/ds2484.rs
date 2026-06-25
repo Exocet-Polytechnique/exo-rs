@@ -23,7 +23,7 @@ pub struct DS2484 {
 }
 
 /// Possible 1-wire ROM commands (network layer)
-// These commands come from DS2484 datasheet (https://www.analog.com/media/en/technical-documentation/data-sheets/ds2484.pdf)
+// These commands come from DS18B20 datasheet (https://www.analog.com/media/en/technical-documentation/data-sheets/DS18B20.pdf)
 #[repr(u8)]
 enum RomCommand {
     ReadRom = 0x33,
