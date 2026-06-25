@@ -5,7 +5,7 @@ edition = "2024"
 license = "GPL-v3"
 
 [dependencies]
-embassy-stm32 = { version = "0.2.0", features = [ "defmt", "time-driver-any", "stm32g474rb", "memory-x", "unstable-pac", "exti"]  }
+embassy-stm32 = { version = "0.6.0", features = [ "defmt", "time-driver-any", "stm32g474rb", "memory-x", "unstable-pac", "exti"]  }
 embassy-sync = { version = "0.7.0", features = ["defmt"] }
 embassy-executor = { version = "0.7.0", features = ["arch-cortex-m", "executor-thread", "defmt"] }
 embassy-time = { version = "0.4.0", features = ["defmt", "defmt-timestamp-uptime", "tick-hz-100_000_000"] }
