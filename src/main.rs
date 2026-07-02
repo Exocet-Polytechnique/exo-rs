@@ -115,11 +115,8 @@ async fn cockpit(
                     state = State::Starting;
                 }
 
-                if led_r.is_set_high() {
-                    led_r.set_low();
-                } else {
-                    led_r.set_high();
-                }
+               led_r.toggle();
+
                 Timer::after_millis(500).await;
             }
 
@@ -182,11 +179,7 @@ async fn cockpit(
             State::Fault => {
                 led_g.set_low();
                 led_y.set_low();
-                if led_r.is_set_high() {
-                    led_r.set_low();
-                } else {
-                    led_r.set_high();
-                }
+                led_r.toggle();
                 info!("Erreur détectée, clignotement de la LED rouge");
                 Timer::after_millis(10).await;
             }
@@ -204,11 +197,10 @@ async fn sender(pin_fdcan1: FDCAN1, pin_a11: PA11, pin_a12: PA12) {
 
     loop {
         let frame = match dbc_gen::FrameP1d::new(
-            Module::Cockpit as u8,
-            Module::Dashboard as u8,
-             DataType::Temperature as u8,
-             25 as u64, 
-
+            0 as u8,
+            0 as u8,
+            DataType::Speed as u8,
+        (18 as f32).to_bits(),
         ) {
             Ok(f) => f,
             Err(_e) => {
@@ -220,6 +212,21 @@ async fn sender(pin_fdcan1: FDCAN1, pin_a11: PA11, pin_a12: PA12) {
 
         match Frame::new_standard(dbc_gen::FrameP1d::MESSAGE_ID as u16, frame.raw()) {
             Ok(f) => {
+            use core::fmt::Write;
+
+            let data = frame.raw();
+
+            let mut hex = heapless::String::<32>::new();
+
+            for b in data {
+                let _ = core::write!(hex, "{:02X}", b);
+            }
+
+            info!(
+                "CAN TX: {:03X}#{}",
+                dbc_gen::FrameP1d::MESSAGE_ID,
+                hex.as_str()
+            );
                 can.write(&f).await;
                 info!("Can frame sent with ID: {}", dbc_gen::FrameP1d::MESSAGE_ID);
             }
@@ -236,10 +243,10 @@ async fn sender(pin_fdcan1: FDCAN1, pin_a11: PA11, pin_a12: PA12) {
 enum Module {
     Broadcast = 0b1111,
     Cockpit = 0b0000,
-    Hydrogen = 0b0001,
+    Hydrogen = 0b001,
     LowPower = 0b0010,
     HighPower = 0b0011,
-    Dashboard = 0b0100,
+    Dashboard = 0b0110,
     Telemetry = 0b0101,
 } // Will need to update the DBC to add the missing modules
 
