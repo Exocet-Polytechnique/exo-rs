@@ -7,7 +7,7 @@ use embassy_time::Timer;
 use embassy_stm32::{
     Config,
     i2c::{self, I2c, Config as I2cConfig},
-    time::{Hertz},
+    dma,
     bind_interrupts,
     peripherals
 };
@@ -38,8 +38,10 @@ fn get_device_config() -> Config {
 }
 
 bind_interrupts!(struct Irqs {
-    I2C1_EV => i2c::EventInterruptHandler<peripherals::I2C1>;
-    I2C1_ER => i2c::ErrorInterruptHandler<peripherals::I2C1>;
+    I2C2_EV => i2c::EventInterruptHandler<peripherals::I2C2>;
+    I2C2_ER => i2c::ErrorInterruptHandler<peripherals::I2C2>;
+    DMA1_CHANNEL6 => dma::InterruptHandler<peripherals::DMA1_CH6>;
+    DMA1_CHANNEL7 => dma::InterruptHandler<peripherals::DMA1_CH7>;
 });
 
 #[embassy_executor::main]
@@ -48,12 +50,12 @@ async fn main(_spawner: Spawner) -> ! {
     let p = embassy_stm32::init(get_device_config());
 
     let i2c = I2c::new(
-        p.I2C1,
-        p.PB8,                  // I2C1_SCL pin
-        p.PB7,                  // I2C1_SDA pin
-        p.DMA1_CH6,           // TX DMA channel
-        p.DMA1_CH7,           // RX DMA channel
-        Irqs,                   // Interrupt bindings
+        p.I2C2,
+        p.PC4,                      // SCL
+        p.PA8,                      // SDA
+        p.DMA1_CH6,              // TX DMA
+        p.DMA1_CH7,              // RX DMA
+        Irqs,                   // IRQ — moved after DMA
         I2cConfig::default(),
     );
 

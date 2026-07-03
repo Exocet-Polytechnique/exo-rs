@@ -1,0 +1,3 @@
+[submodule "exo-can"]
+	path = exo-can
+	url = https://github.com/Exocet-Polytechnique/exo-can

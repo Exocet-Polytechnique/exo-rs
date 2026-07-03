@@ -11,8 +11,8 @@
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
-use embassy_stm32::{Config, Peri, adc::{Adc, AdcChannel, AnyAdcChannel, SampleTime}, can, gpio::{Input, Level, Output, Speed}, i2c::{self, I2c, Config as I2cConfig}, peripherals::{ADC1, ADC2, DMA1_CH1, FDCAN1, PB4, PB5, PB6, PB9, PC1, PC2, PC3, PC6, PC7}};
-use embassy_sync::{blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex}, channel::Channel, priority_channel::PriorityChannel, signal::Signal, watch::Watch};
+use embassy_stm32::{Config, Peri, adc::{Adc, AdcChannel, AnyAdcChannel, SampleTime}, can, gpio::{Input, Level, Output, Speed}, i2c::{self, I2c, Config as I2cConfig}, peripherals::{ADC1, ADC2, FDCAN1, PB4, PB5, PB6, PB9, PC1, PC2, PC3, PC6, PC7}};
+use embassy_sync::{blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex}, channel::Channel, priority_channel::PriorityChannel, watch::Watch};
 use embassy_time::Timer;
 use embedded_hal::can::{Id, StandardId};
 use heapless::binary_heap::Min;
