@@ -25,6 +25,12 @@ heapless = { version = "0.8", default-features = false }
 static_cell = "2.0.0"
 bitvec = { version = "1.0", default-features = false }
 
+[features]
+range_checked = []
+arb = []
+debug = []
+std = []
+
 [profile.release]
 debug = 2
 
