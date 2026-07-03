@@ -40,7 +40,7 @@ enum State {
 enum CanEvent {
     ValidationForStartingState,
     ValidationForShutdownState,
-    RequestShutdown,
+    ForceShutdown,
 }
 
 #[embassy_executor::main]
@@ -98,13 +98,17 @@ async fn can_reader(mut rx: can::CanRx<'static>) {
                 };
                 if id == dbc_gen::FrameP4i::MESSAGE_ID {
                     if let Ok(p4i) = dbc_gen::FrameP4i::try_from(envelope.frame.data()) {
+                        let dest = p4i.dest_module();
+                        if dest != Module::Cockpit as u8 && dest != Module::Broadcast as u8 {
+                            continue;
+                        }
                         let instr = p4i.instruction();
                         if instr == Instructions::ValidationForStartingState as u64 {
                             CAN_CHANNEL.send(CanEvent::ValidationForStartingState).await;
                         } else if instr == Instructions::ValidationForShutdownState as u64 {
                             CAN_CHANNEL.send(CanEvent::ValidationForShutdownState).await;
-                        } else if instr == Instructions::RequestShutdown as u64 {
-                            CAN_CHANNEL.send(CanEvent::RequestShutdown).await;
+                        } else if instr == Instructions::ForceShutdown as u64 {
+                            CAN_CHANNEL.send(CanEvent::ForceShutdown).await;
                         }
                     }
                 }
@@ -115,7 +119,7 @@ async fn can_reader(mut rx: can::CanRx<'static>) {
 }
 
 /// Normal shutdown initiated by the cockpit button.
-/// Sends P1I Shutdown to DriverInterface and waits for ValidationForShutdownState before returning.
+/// Sends P1I CockpitShutdown to DriverInterface and waits for ValidationForShutdownState before returning.
 async fn normal_shutdown(
     tx: &mut can::CanTx<'static>,
     led_g: &mut Output<'_>,
@@ -125,17 +129,17 @@ async fn normal_shutdown(
     if let Ok(frame) = dbc_gen::FrameP1i::new(
         Module::DriverInterface as u8,
         0,
-        Instructions::Shutdown as u64,
+        Instructions::CockpitShutdown as u64,
     ) {
         if let Ok(f) = Frame::new_standard(dbc_gen::FrameP1i::MESSAGE_ID as u16, frame.raw()) {
             tx.write(&f).await;
-            info!("Shutdown instruction sent to DriverInterface");
+            info!("CockpitShutdown instruction sent to DriverInterface");
         }
     }
     loop {
         match select(CAN_CHANNEL.receive(), Timer::after_millis(300)).await {
             Either::First(CanEvent::ValidationForShutdownState) => {
-                info!("Shutdown ACK received");
+                info!("CockpitShutdown ACK received");
                 break;
             }
             Either::First(_) => {}
@@ -193,11 +197,11 @@ async fn cockpit(
                     if let Ok(frame) = dbc_gen::FrameP1i::new(
                         Module::DriverInterface as u8,
                         0,
-                        Instructions::Start as u64,
+                        Instructions::CockpitStart as u64,
                     ) {
                         if let Ok(f) = Frame::new_standard(dbc_gen::FrameP1i::MESSAGE_ID as u16, frame.raw()) {
                             tx.write(&f).await;
-                            info!("Start instruction sent to DriverInterface");
+                            info!("CockpitStart instruction sent to DriverInterface");
                             state = State::STARTING;
                         }
                     }
@@ -209,11 +213,11 @@ async fn cockpit(
             State::STARTING => {
                 match select(CAN_CHANNEL.receive(), Timer::after_millis(300)).await {
                     Either::First(CanEvent::ValidationForStartingState) => {
-                        info!("Start ACK received, entering RUNNING");
+                        info!("CockpitStart ACK received, entering RUNNING");
                         led_g.set_low();
                         state = State::RUNNING;
                     }
-                    Either::First(CanEvent::RequestShutdown) => {
+                    Either::First(CanEvent::ForceShutdown) => {
                         force_shutdown(&mut led_g, &mut led_r, &mut led_y);
                         state = State::IDLE;
                     }
@@ -233,7 +237,7 @@ async fn cockpit(
                 led_y.set_low();
 
                 match select(CAN_CHANNEL.receive(), Timer::after_millis(50)).await {
-                    Either::First(CanEvent::RequestShutdown) => {
+                    Either::First(CanEvent::ForceShutdown) => {
                         force_shutdown(&mut led_g, &mut led_r, &mut led_y);
                         state = State::IDLE;
                     }
@@ -260,15 +264,17 @@ async fn cockpit(
 
 #[repr(u8)]
 enum Module {
+    Broadcast       = 0b0000,
+    Cockpit         = 0b0001,
     DriverInterface = 0b0100,
 }
 
 #[repr(u64)]
 enum Instructions {
     // ForceShutdown = 0x10,  Cockpit → DriverInterface: force immediate shutdown to all PCBs (Cockpit should not send this instruction since no major fault should occur in the cockpit, but this instruction is defined as an example.)
-    Start    = 0x11, // Cockpit → DriverInterface: inform that user wants to start the system
-    Shutdown = 0x12, // Cockpit → DriverInterface: inform that user wants to shutdown the system
-    RequestShutdown             = 0x40, // DriverInterface → Cockpit: requesting immediate shutdown
+    CockpitStart    = 0x11, // Cockpit → DriverInterface: inform that user wants to start the system
+    CockpitShutdown = 0x12, // Cockpit → DriverInterface: inform that user wants to shutdown the system
+    ForceShutdown             = 0x40, // DriverInterface → Cockpit: requesting immediate shutdown
     ValidationForStartingState  = 0x41, // DriverInterface → Cockpit: ready to enter RUNNING
     ValidationForShutdownState  = 0x42, // DriverInterface → Cockpit: ready to return to IDLE
 }
