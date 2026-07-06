@@ -6,6 +6,13 @@ use embassy_stm32::mode::Async;
 const I2C_ADDRESS: u8 = 0x64;
 
 const CONTROL_REG_ADDRESS: u8 = 0x01;
+const VOLTAGE_REG_ADDRESS: u8 = 0x08;
+const CURRENT_REG_ADDRESS: u8 = 0x0E;
+
+/// Fixed full-scale voltage of the LTC2944's voltage ADC (see datasheet).
+const VOLTAGE_FULL_SCALE_V: f32 = 70.8;
+/// Full-scale sense voltage of the LTC2944's current ADC (see datasheet).
+const CURRENT_FULL_SCALE_MV: f32 = 64.0;
 
 const ADC_MODE_CONFIG_BITSHIFT: usize = 6;
 const ADC_MODE_CONFIG_MASK: u8 = 0b11000000;
@@ -127,7 +134,7 @@ impl Configuration {
         ((self.adc_mode as u8) << ADC_MODE_CONFIG_BITSHIFT)
             | ((self.prescaler as u8) << PRESCALER_CONFIG_BITSHIFT)
             | ((self.nalcc_configuration as u8) << NALCC_CONFIG_BITSHIFT)
-            | self.shutdown
+            | (self.shutdown as u8)
     }
 
     fn from_byte(byte: u8) -> Self {
@@ -152,7 +159,7 @@ pub struct LTC2944 {
 type I2CBus = i2c::I2c<'static, Async, i2c::Master>;
 
 impl LTC2944 {
-    pub async fn new(mut i2c_bus: I2CBus, configuration: Option<Configuration>, r_sense: f32) -> Self {
+    pub async fn new(i2c_bus: &mut I2CBus, configuration: Option<Configuration>, r_sense: f32) -> Self {
         let ltc2944 = Self {
             r_sense
         };
@@ -169,15 +176,38 @@ impl LTC2944 {
     }
 
     async fn write_configuration(
-        self: &Self,
-        mut i2c_bus: I2CBus,
+        &self,
+        i2c_bus: &mut I2CBus,
         configuration: Configuration,
     ) -> Result<(), i2c::Error> {
-        let _ = self;
         let control_byte = configuration.to_byte();
 
         i2c_bus
             .write(I2C_ADDRESS, &[CONTROL_REG_ADDRESS, control_byte])
             .await
+    }
+
+    /// Read the battery voltage, in volts.
+    pub async fn read_voltage(&self, i2c_bus: &mut I2CBus) -> Result<f32, i2c::Error> {
+        let mut read_data = [0u8; 2];
+        i2c_bus
+            .write_read(I2C_ADDRESS, &[VOLTAGE_REG_ADDRESS], &mut read_data)
+            .await?;
+
+        let raw = ((read_data[0] as u32) << 8) | (read_data[1] as u32);
+
+        Ok(VOLTAGE_FULL_SCALE_V * (raw as f32) / (u16::MAX as f32))
+    }
+
+    /// Read the battery current, in amps. Positive is charging, negative is discharging.
+    pub async fn read_current(&self, i2c_bus: &mut I2CBus) -> Result<f32, i2c::Error> {
+        let mut read_data = [0u8; 2];
+        i2c_bus
+            .write_read(I2C_ADDRESS, &[CURRENT_REG_ADDRESS], &mut read_data)
+            .await?;
+
+        let raw = (((read_data[0] as u32) << 8) | (read_data[1] as u32)) as i32 - 32767;
+
+        Ok((CURRENT_FULL_SCALE_MV / self.r_sense) * (raw as f32) / 32767.0)
     }
 }

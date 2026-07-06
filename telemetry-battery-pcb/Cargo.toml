@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+exo-drivers = { path = "../exo-drivers/" }
+
 embassy-stm32 = { version = "0.6.0", features = [ "defmt", "time-driver-any", "stm32g474rb", "memory-x", "unstable-pac", "exti", "single-bank" ]  }
 embassy-sync = { version = "0.7.0", features = ["defmt"] }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "defmt"] }
