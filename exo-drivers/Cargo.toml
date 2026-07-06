@@ -5,7 +5,7 @@ edition = "2024"
 license = "GPL-v3"
 
 [dependencies]
-embassy-stm32 = { version = "0.6.0", features = [ "defmt", "time-driver-any", "stm32g474rb", "unstable-pac", "exti", "single-bank"]  }
+embassy-stm32 = { version = "0.6.0", features = [ "defmt", "time-driver-any", "stm32g474re", "unstable-pac", "exti", "single-bank"]  }
 embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime", "tick-hz-32_768"] }
 
 defmt = "1.0.1"
