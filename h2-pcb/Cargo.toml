@@ -28,3 +28,6 @@ exo-drivers = { path = "../exo-drivers/" }
 
 [profile.release]
 debug = 2
+
+[build-dependencies]
+dbc-codegen = "0.3"
