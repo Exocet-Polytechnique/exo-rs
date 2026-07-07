@@ -98,3 +98,20 @@ pub async fn send_state(tx: &mut can::CanTx<'static>, state: dbc_gen::LpPcb01PCu
         }
     }
 }
+
+// Raw ErrorType codes we send on our own HP_PCB01_E. 0/1 (CAN_BUS_FAULT/HARDWARE_FAULT) are
+// reserved by the dbc's VAL_ table; CAN_TIMEOUT isn't in it yet (it's currently misfiled there
+// as a WarningType on LP_PCB01_E, which we don't send — per the spec doc this is critical).
+pub mod error {
+    pub const CAN_TIMEOUT: u16 = 2;
+}
+
+/// Reports our own detected fault via HP_PCB01_E — critical, since a command with no
+/// confirmation means we can no longer trust we've actually changed the boat's state.
+pub async fn send_error(tx: &mut can::CanTx<'static>, error_type: u16) {
+    if let Ok(frame) = dbc_gen::HpPcb01E::new(error_type) {
+        if let Ok(f) = Frame::new_standard(dbc_gen::HpPcb01E::MESSAGE_ID as u16, frame.raw()) {
+            tx.write(&f).await;
+        }
+    }
+}

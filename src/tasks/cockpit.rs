@@ -6,10 +6,14 @@ use embassy_stm32::{
     peripherals::{PA6, PA7, PA8, PB11, PB13},
 };
 use embassy_futures::select::{select, Either};
-use embassy_time::Timer;
+use embassy_time::{Duration, Instant, Timer};
 
 use crate::dbc_gen;
-use crate::tasks::can::{CAN_CHANNEL, CanEvent, send_command, send_state};
+use crate::tasks::can::{CAN_CHANNEL, CanEvent, error, send_command, send_error, send_state};
+
+// Per the spec doc's stated safety constraint: max 10s to hear back after requesting a
+// state change before treating the dashboard as unresponsive.
+const CONFIRMATION_TIMEOUT_MS: u64 = 10_000;
 
 static mut ERROR_FLAG: bool = false;
 
@@ -37,6 +41,7 @@ async fn normal_shutdown(
     )
     .await;
     info!("Shutdown Command sent to DriverInterfaceHAT");
+    let since = Instant::now();
     loop {
         match select(CAN_CHANNEL.receive(), Timer::after_millis(300)).await {
             Either::First(CanEvent::DashboardState(dbc_gen::LpPcb05PCurrentState::Idle)) => {
@@ -46,6 +51,12 @@ async fn normal_shutdown(
             }
             Either::First(_) => {}
             Either::Second(_) => {
+                if since.elapsed() > Duration::from_millis(CONFIRMATION_TIMEOUT_MS) {
+                    error!("Dashboard did not confirm Shutdown in time");
+                    send_error(tx, error::CAN_TIMEOUT).await;
+                    unsafe { ERROR_FLAG = true; }
+                    break;
+                }
                 led_r.toggle();
                 led_g.set_low();
                 led_y.set_low();
@@ -84,6 +95,9 @@ pub async fn cockpit(
     let button_r = Input::new(pin_b11, Pull::Down);
 
     let mut state = State::IDLE;
+    // When the Start Command was sent, entering STARTING — checked against
+    // CONFIRMATION_TIMEOUT_MS in that state's timeout branch.
+    let mut command_sent_at = Instant::now();
     loop {
         if unsafe { ERROR_FLAG } {
             state = State::FAULT;
@@ -111,6 +125,7 @@ pub async fn cockpit(
                             )
                             .await;
                             info!("Start Command sent to DriverInterfaceHAT");
+                            command_sent_at = Instant::now();
                             state = State::STARTING;
                         }
                     }
@@ -134,6 +149,12 @@ pub async fn cockpit(
                     }
                     Either::First(_) => {}
                     Either::Second(_) => {
+                        if command_sent_at.elapsed() > Duration::from_millis(CONFIRMATION_TIMEOUT_MS) {
+                            error!("Dashboard did not confirm Start in time");
+                            send_error(&mut tx, error::CAN_TIMEOUT).await;
+                            unsafe { ERROR_FLAG = true; }
+                            continue;
+                        }
                         // Still waiting: blink green
                         led_g.toggle();
                         led_r.set_low();
