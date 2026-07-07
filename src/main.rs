@@ -24,7 +24,7 @@ static CAN_CHANNEL: Channel<CriticalSectionRawMutex, CanEvent, 4> = Channel::new
 
 // If DriverInterfaceHAT's LP_PCB05_P heartbeat (MessageType=1, CurrentState) hasn't been seen
 // for this long while STARTING/RUNNING, treat it as a dead dashboard and fault out.
-const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
+const HEARTBEAT_TIMEOUT_MS: u64 = 8000;
 
 bind_interrupts!(struct Irqs {
     FDCAN1_IT0 => can::IT0InterruptHandler<FDCAN1>;
