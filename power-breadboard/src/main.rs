@@ -23,6 +23,10 @@ use {defmt_rtt as _, panic_probe as _};
 use embassy_stm32::{Config, can, gpio::{Input, Level, Output, Pull, Speed}, i2c::{self, I2c}, time::Hertz, usart::{self, Uart}};
 use embassy_stm32::{bind_interrupts, dma, peripherals};
 
+pub mod dbc_gen {
+    include!(concat!(env!("OUT_DIR"), "/dbc_gen.rs"));
+}
+
 bind_interrupts!(struct Irqs {
     DMA1_CHANNEL1 => dma::InterruptHandler<peripherals::DMA1_CH1>;
     DMA1_CHANNEL2 => dma::InterruptHandler<peripherals::DMA1_CH2>;
