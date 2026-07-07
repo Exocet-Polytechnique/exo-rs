@@ -11,7 +11,7 @@ use embassy_stm32::{
 };
 use embassy_futures::select::{select, Either};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
-use embassy_time::Timer;
+use embassy_time::{Duration, Instant, Timer};
 use {defmt_rtt as _, panic_probe as _};
 
 pub mod dbc_gen {
@@ -21,6 +21,10 @@ pub mod dbc_gen {
 static mut ERROR_FLAG: bool = false;
 
 static CAN_CHANNEL: Channel<CriticalSectionRawMutex, CanEvent, 4> = Channel::new();
+
+// If DriverInterfaceHAT's LP_PCB05_P heartbeat (MessageType=1, CurrentState) hasn't been seen
+// for this long while STARTING/RUNNING, treat it as a dead dashboard and fault out.
+const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 bind_interrupts!(struct Irqs {
     FDCAN1_IT0 => can::IT0InterruptHandler<FDCAN1>;
@@ -35,16 +39,18 @@ enum State {
     FAULT,
 }
 
-// External events derived from DriverInterfaceHAT's LP_PCB05_P broadcast frame over CAN.
-// These are sent to the cockpit task via CAN_CHANNEL.
-// - ValidationForStartingState: CurrentState (MessageType=1) reports Started
-// - ValidationForShutdownState: CurrentState (MessageType=1) reports Idle
-// - ForceShutdown: Command (MessageType=2) addressed to us (or Broadcast) is ForceShutdown
+// External events derived from DriverInterfaceHAT's frames over CAN, sent to the cockpit task
+// via CAN_CHANNEL.
+// - DashboardState: LP_PCB05_P CurrentState (MessageType=1) heartbeat — sent on every occurrence,
+//   regardless of value, so the cockpit task can use it both to detect Started/Idle and to know
+//   the dashboard is still alive.
+// - ForceShutdown: LP_PCB05_P Command (MessageType=2) addressed to us (or Broadcast) is ForceShutdown
+// - CriticalError: HP_PCB05_E (any error code)
 #[derive(Clone, Copy)]
 enum CanEvent {
-    ValidationForStartingState,
-    ValidationForShutdownState,
+    DashboardState(dbc_gen::LpPcb05PCurrentState),
     ForceShutdown,
+    CriticalError,
 }
 
 #[embassy_executor::main]
@@ -102,34 +108,31 @@ async fn can_reader(mut rx: can::CanRx<'static>) {
                     embedded_can::Id::Standard(id) => id.as_raw() as u32,
                     _ => continue,
                 };
-                if id != dbc_gen::LpPcb05P::MESSAGE_ID {
-                    continue;
-                }
-                let Ok(mut lp_p) = dbc_gen::LpPcb05P::try_from(envelope.frame.data()) else {
-                    continue;
-                };
-                match lp_p.message_type() {
-                    Ok(dbc_gen::LpPcb05PMessageType::M1(m1)) => match m1.current_state() {
-                        dbc_gen::LpPcb05PCurrentState::Started => {
-                            CAN_CHANNEL.send(CanEvent::ValidationForStartingState).await;
+                if id == dbc_gen::LpPcb05P::MESSAGE_ID {
+                    let Ok(mut lp_p) = dbc_gen::LpPcb05P::try_from(envelope.frame.data()) else {
+                        continue;
+                    };
+                    match lp_p.message_type() {
+                        Ok(dbc_gen::LpPcb05PMessageType::M1(m1)) => {
+                            CAN_CHANNEL.send(CanEvent::DashboardState(m1.current_state())).await;
                         }
-                        dbc_gen::LpPcb05PCurrentState::Idle => {
-                            CAN_CHANNEL.send(CanEvent::ValidationForShutdownState).await;
+                        Ok(dbc_gen::LpPcb05PMessageType::M2(m2)) => {
+                            let target = m2.target_module();
+                            if target != dbc_gen::LpPcb05PTargetModule::CockpitEcu
+                                && target != dbc_gen::LpPcb05PTargetModule::Broadcast
+                            {
+                                continue;
+                            }
+                            if m2.command() == dbc_gen::LpPcb05PCommand::ForceShutdown {
+                                CAN_CHANNEL.send(CanEvent::ForceShutdown).await;
+                            }
                         }
                         _ => {}
-                    },
-                    Ok(dbc_gen::LpPcb05PMessageType::M2(m2)) => {
-                        let target = m2.target_module();
-                        if target != dbc_gen::LpPcb05PTargetModule::CockpitEcu
-                            && target != dbc_gen::LpPcb05PTargetModule::Broadcast
-                        {
-                            continue;
-                        }
-                        if m2.command() == dbc_gen::LpPcb05PCommand::ForceShutdown {
-                            CAN_CHANNEL.send(CanEvent::ForceShutdown).await;
-                        }
                     }
-                    _ => {}
+                } else if id == dbc_gen::HpPcb05E::MESSAGE_ID {
+                    if dbc_gen::HpPcb05E::try_from(envelope.frame.data()).is_ok() {
+                        CAN_CHANNEL.send(CanEvent::CriticalError).await;
+                    }
                 }
             }
             Err(_) => error!("CAN read error"),
@@ -160,7 +163,8 @@ async fn send_command(
 }
 
 /// Normal shutdown initiated by the cockpit button.
-/// Sends a Shutdown Command to DriverInterfaceHAT and waits for ValidationForShutdownState before returning.
+/// Sends a Shutdown Command to DriverInterfaceHAT and waits for its CurrentState heartbeat to
+/// report Idle before returning.
 async fn normal_shutdown(
     tx: &mut can::CanTx<'static>,
     led_g: &mut Output<'_>,
@@ -176,8 +180,8 @@ async fn normal_shutdown(
     info!("Shutdown Command sent to DriverInterfaceHAT");
     loop {
         match select(CAN_CHANNEL.receive(), Timer::after_millis(300)).await {
-            Either::First(CanEvent::ValidationForShutdownState) => {
-                info!("CockpitShutdown ACK received");
+            Either::First(CanEvent::DashboardState(dbc_gen::LpPcb05PCurrentState::Idle)) => {
+                info!("CockpitShutdown ACK received (dashboard reports Idle)");
                 break;
             }
             Either::First(_) => {}
@@ -220,6 +224,9 @@ async fn cockpit(
     let button_r = Input::new(pin_b11, Pull::Down);
 
     let mut state = State::IDLE;
+    // Last time we heard DriverInterfaceHAT's LP_PCB05_P heartbeat. Only enforced as a timeout
+    // in STARTING/RUNNING, where the system actively depends on the dashboard being alive.
+    let mut last_heartbeat = Instant::now();
     loop {
         if unsafe { ERROR_FLAG } {
             state = State::FAULT;
@@ -231,37 +238,58 @@ async fn cockpit(
                 led_g.set_low();
                 led_y.set_low();
 
-                if button_g.is_high() {
-                    send_command(
-                        &mut tx,
-                        dbc_gen::LpPcb01PTargetModule::DriverInterfaceHat,
-                        dbc_gen::LpPcb01PCommand::Start,
-                    )
-                    .await;
-                    info!("Start Command sent to DriverInterfaceHAT");
-                    state = State::STARTING;
+                // Drain CAN_CHANNEL even while idle so the heartbeat (sent continuously by the
+                // dashboard) never fills the channel and stalls can_reader.
+                match select(CAN_CHANNEL.receive(), Timer::after_millis(50)).await {
+                    Either::First(CanEvent::DashboardState(_)) => {
+                        last_heartbeat = Instant::now();
+                    }
+                    Either::First(CanEvent::CriticalError) => {
+                        unsafe { ERROR_FLAG = true; }
+                    }
+                    Either::First(_) => {}
+                    Either::Second(_) => {
+                        if button_g.is_high() {
+                            send_command(
+                                &mut tx,
+                                dbc_gen::LpPcb01PTargetModule::DriverInterfaceHat,
+                                dbc_gen::LpPcb01PCommand::Start,
+                            )
+                            .await;
+                            info!("Start Command sent to DriverInterfaceHAT");
+                            state = State::STARTING;
+                        }
+                    }
                 }
-
-                Timer::after_millis(50).await;
             }
 
             State::STARTING => {
                 match select(CAN_CHANNEL.receive(), Timer::after_millis(300)).await {
-                    Either::First(CanEvent::ValidationForStartingState) => {
-                        info!("CockpitStart ACK received, entering RUNNING");
-                        led_g.set_low();
-                        state = State::RUNNING;
+                    Either::First(CanEvent::DashboardState(s)) => {
+                        last_heartbeat = Instant::now();
+                        if s == dbc_gen::LpPcb05PCurrentState::Started {
+                            info!("Dashboard reports Started, entering RUNNING");
+                            led_g.set_low();
+                            state = State::RUNNING;
+                        }
                     }
                     Either::First(CanEvent::ForceShutdown) => {
                         force_shutdown(&mut led_g, &mut led_r, &mut led_y);
                         state = State::IDLE;
                     }
-                    Either::First(_) => {} // other events in STARTING, ignore
+                    Either::First(CanEvent::CriticalError) => {
+                        unsafe { ERROR_FLAG = true; }
+                    }
                     Either::Second(_) => {
-                        // No frame received: still waiting. blink green
-                        led_g.toggle();
-                        led_r.set_low();
-                        led_y.set_low();
+                        if last_heartbeat.elapsed() > Duration::from_millis(HEARTBEAT_TIMEOUT_MS) {
+                            error!("Dashboard heartbeat timed out while STARTING");
+                            unsafe { ERROR_FLAG = true; }
+                        } else {
+                            // Still waiting: blink green
+                            led_g.toggle();
+                            led_r.set_low();
+                            led_y.set_low();
+                        }
                     }
                 }
             }
@@ -272,13 +300,21 @@ async fn cockpit(
                 led_y.set_low();
 
                 match select(CAN_CHANNEL.receive(), Timer::after_millis(50)).await {
+                    Either::First(CanEvent::DashboardState(_)) => {
+                        last_heartbeat = Instant::now();
+                    }
                     Either::First(CanEvent::ForceShutdown) => {
                         force_shutdown(&mut led_g, &mut led_r, &mut led_y);
                         state = State::IDLE;
                     }
-                    Either::First(_) => {} // unexpected events, ignore
+                    Either::First(CanEvent::CriticalError) => {
+                        unsafe { ERROR_FLAG = true; }
+                    }
                     Either::Second(_) => {
-                        if button_r.is_high() {
+                        if last_heartbeat.elapsed() > Duration::from_millis(HEARTBEAT_TIMEOUT_MS) {
+                            error!("Dashboard heartbeat timed out while RUNNING");
+                            unsafe { ERROR_FLAG = true; }
+                        } else if button_r.is_high() {
                             normal_shutdown(&mut tx, &mut led_g, &mut led_r, &mut led_y).await;
                             state = State::IDLE;
                         }
@@ -291,7 +327,8 @@ async fn cockpit(
                 led_y.set_low();
                 led_r.toggle();
                 info!("Erreur détectée, clignotement de la LED rouge");
-                Timer::after_millis(10).await;
+                // Keep draining CAN_CHANNEL so a live dashboard doesn't back up while faulted.
+                let _ = select(CAN_CHANNEL.receive(), Timer::after_millis(10)).await;
             }
         }
     }
