@@ -51,13 +51,17 @@ async fn main(spawner: Spawner) {
         });
         config.rcc.pll = Some(Pll {
             source: PllSource::HSE,
-            prediv: PllPreDiv::DIV3,
-            mul: PllMul::MUL20,
-            divp: Some(PllPDiv::DIV8), // P clock at 20 MHz
-            divq: Some(PllQDiv::DIV4), // CAN and peripheral clock at 40 MHz
-            divr: Some(PllRDiv::DIV2), // Main system clock at 80 MHz
+            prediv: PllPreDiv::DIV6,
+            mul: PllMul::MUL85,
+            divp: None,
+            divq: Some(PllQDiv::DIV8), // 42.5 MHz for CAN
+            divr: Some(PllRDiv::DIV2), // Main sys clock at 170 MHz
+            // prediv: PllPreDiv::DIV3,
+            // mul: PllMul::MUL20,
+            // divp: Some(PllPDiv::DIV8), // P clock at 20 MHz
+            // divq: Some(PllQDiv::DIV4), // CAN and peripheral clock at 40 MHz
+            // divr: Some(PllRDiv::DIV2), // Main system clock at 80 MHz
         });
-        config.rcc.mux.adc12sel = mux::Adcsel::SYS;
         config.rcc.mux.fdcansel = mux::Fdcansel::PLL1_Q;
         config.rcc.sys = Sysclk::PLL1_R;
     }
@@ -102,7 +106,7 @@ async fn main(spawner: Spawner) {
         // Inputs
         alarm_status: Input::new(p.PB7, Pull::None),
         dms_fault_latch: Input::new(p.PA0, Pull::None),
-        dms_status: Input::new(p.PA4, Pull::None),
+        dms_status: Input::new(p.PB0, Pull::None),
 
         // Outputs
         alarm_force: Output::new(p.PC2, Level::Low, Speed::Low),
@@ -128,7 +132,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(unwrap!(imd_task(imd_can_bus)));
     spawner.spawn(unwrap!(fuel_cell_task(fc_uart)));
     spawner.spawn(unwrap!(mppt_task(mppt_uart)));
-    spawner.spawn(unwrap!(temperature_task(temperature_i2c)));
+    // spawner.spawn(unwrap!(temperature_task(temperature_i2c)));
     spawner.spawn(unwrap!(contactors_task(contactor_ouputs)));
 
     loop {

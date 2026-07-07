@@ -1,8 +1,11 @@
+use defmt::*;
+
 use embassy_futures::select::{Either, select};
 use embassy_stm32::gpio::{Input, Output};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch::{self, Watch}};
 use embassy_time::Timer;
 
-use crate::tasks::can::{BoatState, CURRENT_STATE, ERROR_CHANNEL, ErrorType, WARNING_CHANNEL, WarningType};
+use crate::tasks::{can::{BoatState, CURRENT_STATE, ERROR_CHANNEL, ErrorType, WARNING_CHANNEL, WarningType}, contactors::{CURRENT_CONTACTORS_STATE, ContactorsState}};
 
 const TICK_DELAY_MS: u64 = 250;
 const DMS_RESET_DELAY_MS: u64 = 10;
@@ -20,7 +23,7 @@ pub struct SafetyGpios {
 }
 
 #[derive(PartialEq, Clone, Copy)]
-enum SafetyState {
+pub enum SafetyState {
     Idle,
     WaitingRemoval,
     WaitingInsertion,
@@ -30,9 +33,10 @@ enum SafetyState {
     WaitingContactorShutdown,
 }
 
-static mut CURRENT_SAFTEY_STATE: SafetyState = SafetyState::Idle;
+pub static CURRENT_SAFETY_STATE: Watch<CriticalSectionRawMutex, SafetyState, 1> = Watch::new();
+type SafetyStateSender = watch::Sender<'static, CriticalSectionRawMutex, SafetyState, 1>;
 
-async fn goto_state(gpios: &mut SafetyGpios, mut target: SafetyState) {
+async fn goto_state(gpios: &mut SafetyGpios, mut target: SafetyState, state_sender: &SafetyStateSender) {
     match target {
         SafetyState::Idle => {
             gpios.enable_dms.set_low();
@@ -63,30 +67,35 @@ async fn goto_state(gpios: &mut SafetyGpios, mut target: SafetyState) {
         _ => {}
     }
 
-    unsafe { CURRENT_SAFTEY_STATE = target };
+    state_sender.send(target);
 }
 
-async fn state_tick(gpios: &mut SafetyGpios) {
-    match unsafe { CURRENT_SAFTEY_STATE } {
+async fn state_tick(gpios: &mut SafetyGpios, state_sender: &SafetyStateSender) {
+    match CURRENT_SAFETY_STATE.try_get().unwrap() {
         SafetyState::WaitingRemoval => {
             if gpios.dms_status.is_high() {
-                goto_state(gpios, SafetyState::WaitingInsertion).await;
+                goto_state(gpios, SafetyState::WaitingInsertion, state_sender).await;
             }
         }
         SafetyState::WaitingInsertion => {
             if gpios.dms_status.is_low() {
-                goto_state(gpios, SafetyState::Ready).await;
+                goto_state(gpios, SafetyState::Ready, state_sender).await;
             }
         }
         SafetyState::Ready => {
-            if gpios.dms_status.is_high() {
-                goto_state(gpios, SafetyState::DmsFault).await;
-            } else if gpios.alarm_status.is_high() {
-                goto_state(gpios, SafetyState::AlarmFault).await;
-            }
+            // TODO: uncomment
+            // if gpios.dms_status.is_high() {
+            //     goto_state(gpios, SafetyState::DmsFault, state_sender).await;
+            // } else if gpios.alarm_status.is_high() {
+            //     goto_state(gpios, SafetyState::AlarmFault, state_sender).await;
+            // }
         }
         SafetyState::WaitingContactorShutdown => {
-            // TODO: goto idle state when the contactors have fully shut down
+            if let Some(contactors_state) = CURRENT_CONTACTORS_STATE.try_get() {
+                if contactors_state == ContactorsState::Idle {
+                    goto_state(gpios, SafetyState::Idle, state_sender).await;
+                }
+            }
         }
         _ => {}
     }
@@ -96,16 +105,19 @@ async fn state_tick(gpios: &mut SafetyGpios) {
 pub async fn safety_task(mut gpios: SafetyGpios) {
     let mut state_receiver = CURRENT_STATE.receiver().unwrap();
 
+    let state_sender = CURRENT_SAFETY_STATE.sender();
+    state_sender.send(SafetyState::Idle);
+
     loop {
         match select(Timer::after_millis(TICK_DELAY_MS), state_receiver.changed()).await {
             Either::First(_) => {
-                state_tick(&mut gpios).await;
+                state_tick(&mut gpios, &state_sender).await;
             }
             Either::Second(new_state) => {
                 if new_state == BoatState::Startup {
-                    goto_state(&mut gpios, SafetyState::WaitingRemoval).await;
+                    goto_state(&mut gpios, SafetyState::WaitingRemoval, &state_sender).await;
                 } else if new_state == BoatState::Shutdown {
-                    goto_state(&mut gpios, SafetyState::WaitingContactorShutdown).await;
+                    goto_state(&mut gpios, SafetyState::WaitingContactorShutdown, &state_sender).await;
                 }
             }
         }
