@@ -4,6 +4,8 @@ use embassy_stm32::can::{Can, Frame};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::{self, Watch}};
 use embassy_time::Timer;
 
+use crate::dbc_gen;
+
 pub enum CanData {
     Temperature(u16)
 }
@@ -43,9 +45,29 @@ pub static CURRENT_STATE: Watch<CriticalSectionRawMutex, BoatState, 2> = Watch::
 pub type StateReceiver = watch::Receiver<'static, CriticalSectionRawMutex, BoatState, 2>;
 
 async fn receive_frame(frame: Frame) {
+
 }
 
-async fn send_data(data: CanData) {
+async fn send_data(can_bus: &mut Can<'static>, data: CanData) {
+    match data {
+        CanData::Temperature(raw) => {
+            let mut m0 = dbc_gen::LpPcb04DSensorM0::new();
+            // `raw` is already to_fixed16(celsius, 4) == celsius * 16, which is exactly the
+            // AuxBatteryTemperature signal's raw encoding (factor 0.0625 == 1/16). The generated
+            // setter takes physical Celsius and re-applies that factor, so convert back first.
+            let celsius = (raw as i16) as f32 / 16.0;
+            if m0.set_aux_battery_temperature(celsius).is_err() {
+                return;
+            }
+            if let Ok(mut lp_d) = dbc_gen::LpPcb04D::new(0) {
+                if lp_d.set_m0(m0).is_ok() {
+                    if let Ok(f) = Frame::new_standard(dbc_gen::LpPcb04D::MESSAGE_ID as u16, lp_d.raw()) {
+                        can_bus.write(&f).await;
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -88,7 +110,7 @@ pub async fn can_task(mut can_bus: Can<'static>) {
                 }
             }
             Either4::Second(data) => {
-                send_data(data).await;
+                send_data(&mut can_bus, data).await;
             }
             Either4::Third(error) => {
                 send_error(ErrorOrWarning::Err(error)).await;
