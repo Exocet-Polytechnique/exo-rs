@@ -102,8 +102,9 @@ pub async fn send_state(tx: &mut can::CanTx<'static>, state: dbc_gen::LpPcb01PCu
 // Raw ErrorType codes we send on our own HP_PCB01_E. 0/1 (CAN_BUS_FAULT/HARDWARE_FAULT) are
 // reserved by the dbc's VAL_ table; CAN_TIMEOUT isn't in it yet (it's currently misfiled there
 // as a WarningType on LP_PCB01_E, which we don't send — per the spec doc this is critical).
+// Must match the dashboard's error dictionary (exo-server) exactly.
 pub mod error {
-    pub const CAN_TIMEOUT: u16 = 2;
+    pub const CAN_TIMEOUT: u16 = 0x1002;
 }
 
 /// Reports our own detected fault via HP_PCB01_E — critical, since a command with no
