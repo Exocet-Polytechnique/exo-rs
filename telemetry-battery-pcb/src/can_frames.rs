@@ -8,6 +8,12 @@ const ERROR_FRAME_ID: u16 = 143;
 const WARNING_FRAME_ID: u16 = 1167;
 /// `LP_PCB03_D`: sensor data frame, multiplexed by [`Sensor`].
 const DATA_FRAME_ID: u16 = 1199;
+/// `LP_PCB03_P`: our own procedure/state frame. Only the CurrentState group (MessageType=1) is
+/// used here; this board has no Start/Shutdown Command handling of its own.
+const PROCEDURE_FRAME_ID: u16 = 1183;
+/// `LP_PCB05_P`: DriverInterfaceHAT's procedure/state frame — listened to for its CurrentState
+/// announcements (Starting/ShuttingDown) so we know when to confirm our own state.
+pub const DASHBOARD_PROCEDURE_FRAME_ID: u16 = 1311;
 
 #[repr(u8)]
 enum Sensor {
@@ -29,6 +35,25 @@ pub enum ErrorType {
 pub enum WarningType {
     LowCharge = 0,
     TemperatureWarning = 1,
+}
+
+/// Our own CurrentState, sent on LP_PCB03_P (MessageType=1) to confirm a state change announced
+/// by the dashboard. Values per the dbc's shared CurrentState table (Idle/Startup/Running/Shutdown).
+#[repr(u8)]
+#[derive(Clone, Copy)]
+pub enum CurrentState {
+    Idle = 0,
+    Running = 2,
+}
+
+/// DriverInterfaceHAT's CurrentState, decoded from its LP_PCB05_P (MessageType=1). Uses its own
+/// value table (Idle/Starting/Started/ShuttingDown), distinct from every other PCB's CurrentState.
+#[derive(Clone, Copy, PartialEq)]
+pub enum DashboardState {
+    Idle,
+    Starting,
+    Started,
+    ShuttingDown,
 }
 
 const BATT_CURRENT_SCALE_A: f32 = 0.001953125;
@@ -73,4 +98,27 @@ pub fn temperature_data_frame(temperature_c: f32) -> Frame {
     data[1..3].copy_from_slice(&((temp_raw as u16) & 0x0FFF).to_le_bytes());
 
     Frame::new_standard(DATA_FRAME_ID, &data).unwrap()
+}
+
+/// Build our own LP_PCB03_P CurrentState confirmation. MessageType (bits 0-1) = 1 (CurrentState
+/// group), CurrentState (bits 2-7) = `state` — both fit in a single byte, byte 1 unused.
+pub fn state_frame(state: CurrentState) -> Frame {
+    let byte0 = ((state as u8) << 2) | 0b01;
+    Frame::new_standard(PROCEDURE_FRAME_ID, &[byte0, 0]).unwrap()
+}
+
+/// Decode an incoming LP_PCB05_P payload's CurrentState. Returns `None` if the frame isn't
+/// currently announcing CurrentState (MessageType != 1, e.g. it's a ProcedureStatus or Command).
+pub fn decode_dashboard_state(data: &[u8]) -> Option<DashboardState> {
+    let byte0 = *data.first()?;
+    if byte0 & 0b11 != 1 {
+        return None;
+    }
+    match byte0 >> 2 {
+        0 => Some(DashboardState::Idle),
+        1 => Some(DashboardState::Starting),
+        2 => Some(DashboardState::Started),
+        3 => Some(DashboardState::ShuttingDown),
+        _ => None,
+    }
 }

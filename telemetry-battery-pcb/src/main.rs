@@ -15,6 +15,7 @@ mod fault;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::can;
+use embassy_stm32::can::filter::{Action, FilterType, StandardFilter, StandardFilterSlot};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::Watch;
@@ -166,6 +167,42 @@ async fn temperature_task(mut bus: OneWireBus, mut sensor: DS18B20, mut can_tx: 
     }
 }
 
+/// Listens for DriverInterfaceHAT's state announcements (LP_PCB05_P) and immediately confirms
+/// our own state back on LP_PCB03_P. This board has no startup/shutdown sequencing of its own —
+/// the 5V/24V outputs are already unconditionally enabled once at boot in `startup_sequence` — so
+/// the confirmation is an unconditional rubber-stamp of whatever the dashboard just announced,
+/// not a real gate on anything.
+#[embassy_executor::task]
+async fn dashboard_state_task(can_rx: can::BufferedCanReceiver, mut can_tx: can::BufferedCanSender) {
+    info!("Dashboard state task start");
+
+    loop {
+        match can_rx.receive().await {
+            Ok(envelope) => {
+                let id = match envelope.frame.id() {
+                    embedded_can::Id::Standard(id) => id.as_raw(),
+                    _ => continue,
+                };
+                if id != can_frames::DASHBOARD_PROCEDURE_FRAME_ID {
+                    continue;
+                }
+                match can_frames::decode_dashboard_state(envelope.frame.data()) {
+                    Some(can_frames::DashboardState::Starting) => {
+                        info!("Dashboard announced Starting, confirming Running");
+                        can_tx.write(can_frames::state_frame(can_frames::CurrentState::Running)).await;
+                    }
+                    Some(can_frames::DashboardState::ShuttingDown) => {
+                        info!("Dashboard announced ShuttingDown, confirming Idle");
+                        can_tx.write(can_frames::state_frame(can_frames::CurrentState::Idle)).await;
+                    }
+                    _ => {}
+                }
+            }
+            Err(_) => error!("CAN read error"),
+        }
+    }
+}
+
 async fn startup_sequence(i2c_con: &mut i2c::I2c<'static, Async, i2c::Master>)
 {
     let mut read_data = [0u8; 2];
@@ -256,6 +293,26 @@ async fn main(spawner: Spawner) {
 
     let mut can_configurator = can::CanConfigurator::new(p.FDCAN1, p.PA11, p.PA12, Irqs);
     can_configurator.set_bitrate(CAN_BITRATE);
+
+    // Accept only DriverInterfaceHAT's frames (HP_PCB05_E=271, LP_PCB05_E=1295, LP_PCB05_P=1311)
+    // and reject everything else, so the single-slot CAN_RX_BUF below can't get occupied by
+    // traffic from other PCBs. Only LP_PCB05_P is acted on today; the error/warning frames are
+    // admitted for future use. Mask 0x3EF covers every bit the three IDs share.
+    can_configurator.properties().set_standard_filter(
+        StandardFilterSlot::_0,
+        StandardFilter {
+            filter: FilterType::BitMask { filter: 271_u16, mask: 0x3EF },
+            action: Action::StoreInFifo0,
+        },
+    );
+    can_configurator.properties().set_standard_filter(
+        StandardFilterSlot::_1,
+        StandardFilter {
+            filter: FilterType::BitMask { filter: 0_u16, mask: 0_u16 },
+            action: Action::Reject,
+        },
+    );
+
     let can = can_configurator.start(can::OperatingMode::NormalOperationMode);
 
     static CAN_TX_BUF: StaticCell<can::TxBuf<16>> = StaticCell::new();
@@ -268,6 +325,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(unwrap!(battery_task(i2c_con, ltc, can.writer())));
     spawner.spawn(unwrap!(battery_data_task(can.writer())));
     spawner.spawn(unwrap!(temperature_task(one_wire_bus, battery_temp_sensor, can.writer())));
+    spawner.spawn(unwrap!(dashboard_state_task(can.reader(), can.writer())));
 
     // TODO: tasks still missing:
     // - EEPROM task: regularly save the voltage and charge
