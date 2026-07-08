@@ -41,12 +41,19 @@ async fn normal_shutdown(
     )
     .await;
     info!("Shutdown Command sent to DriverInterfaceHAT");
-    let since = Instant::now();
+    let mut since = Instant::now();
     loop {
         match select(CAN_CHANNEL.receive(), Timer::after_millis(300)).await {
-            Either::First(CanEvent::DashboardState(dbc_gen::LpPcb05PCurrentState::Idle)) => {
-                info!("Dashboard announced Idle, confirming");
+            Either::First(CanEvent::DashboardState(dbc_gen::LpPcb05PCurrentState::ShuttingDown)) => {
+                info!("Dashboard announced ShuttingDown, confirming our own shutdown");
                 send_state(tx, dbc_gen::LpPcb01PCurrentState::Idle).await;
+                // The dashboard now waits on every PCB's confirmation before announcing Idle —
+                // give it a fresh confirmation window from this point rather than keep counting
+                // down from when we first sent the Shutdown Command.
+                since = Instant::now();
+            }
+            Either::First(CanEvent::DashboardState(dbc_gen::LpPcb05PCurrentState::Idle)) => {
+                info!("Dashboard announced Idle, shutdown complete");
                 break;
             }
             Either::First(_) => {}
@@ -134,9 +141,16 @@ pub async fn cockpit(
 
             State::STARTING => {
                 match select(CAN_CHANNEL.receive(), Timer::after_millis(300)).await {
-                    Either::First(CanEvent::DashboardState(dbc_gen::LpPcb05PCurrentState::Started)) => {
-                        info!("Dashboard announced Started, confirming and entering RUNNING");
+                    Either::First(CanEvent::DashboardState(dbc_gen::LpPcb05PCurrentState::Starting)) => {
+                        info!("Dashboard announced Starting, confirming our own startup");
                         send_state(&mut tx, dbc_gen::LpPcb01PCurrentState::Running).await;
+                        // The dashboard now waits on every PCB's confirmation before announcing
+                        // Started — give it a fresh confirmation window from this point rather
+                        // than keep counting down from when we first sent the Start Command.
+                        command_sent_at = Instant::now();
+                    }
+                    Either::First(CanEvent::DashboardState(dbc_gen::LpPcb05PCurrentState::Started)) => {
+                        info!("Dashboard announced Started, entering RUNNING");
                         led_g.set_low();
                         state = State::RUNNING;
                     }
