@@ -18,7 +18,7 @@ pub mod dbc_gen {
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::can;
+use embassy_stm32::{Config, can};
 use embassy_stm32::can::filter::{Action, FilterType, StandardFilter, StandardFilterSlot};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -256,7 +256,27 @@ async fn startup_sequence(i2c_con: &mut i2c::I2c<'static, Async, i2c::Master>)
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_stm32::init(Default::default());
+    let mut config = Config::default();
+    {
+        use embassy_stm32::rcc::*;
+        config.rcc.hse = Some(Hse {
+            freq: Hertz(8_000_000), // 8-MHz oscillator
+            mode: HseMode::Oscillator,
+        });
+        config.rcc.pll = Some(Pll {
+            source: PllSource::HSE,
+            prediv: PllPreDiv::DIV2,
+            mul: PllMul::MUL85,
+            divp: None,
+            divq: Some(PllQDiv::DIV8), // 42.5 MHz for CAN
+            divr: Some(PllRDiv::DIV2), // Main system clock at 170 MHz
+        });
+        config.rcc.mux.adc12sel = mux::Adcsel::SYS;
+        config.rcc.mux.fdcansel = mux::Fdcansel::PLL1_Q;
+        config.rcc.sys = Sysclk::PLL1_R;
+    }
+    let p = embassy_stm32::init(config);
+
 
     let mut status_led = Output::new(p.PC0, Level::Low, Speed::Low);
 
