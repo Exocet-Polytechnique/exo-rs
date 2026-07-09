@@ -25,6 +25,10 @@ panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 heapless = { version = "0.8", default-features = false }
 static_cell = "2.0.0"
 critical-section = "1.1"
+bitvec = { version = "1.0", default-features = false }
 
 [profile.release]
 debug = 2
+
+[build-dependencies]
+dbc-codegen = "0.3"

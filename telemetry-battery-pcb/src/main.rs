@@ -12,6 +12,10 @@ mod battery_soc;
 mod can_frames;
 mod fault;
 
+pub mod dbc_gen {
+    include!(concat!(env!("OUT_DIR"), "/dbc_gen.rs"));
+}
+
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::can;
