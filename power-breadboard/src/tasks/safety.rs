@@ -83,12 +83,11 @@ async fn state_tick(gpios: &mut SafetyGpios, state_sender: &SafetyStateSender) {
             }
         }
         SafetyState::Ready => {
-            // TODO: uncomment
-            // if gpios.dms_status.is_high() {
-            //     goto_state(gpios, SafetyState::DmsFault, state_sender).await;
-            // } else if gpios.alarm_status.is_high() {
-            //     goto_state(gpios, SafetyState::AlarmFault, state_sender).await;
-            // }
+            if gpios.dms_status.is_high() {
+                goto_state(gpios, SafetyState::DmsFault, state_sender).await;
+            } else if gpios.alarm_status.is_high() {
+                goto_state(gpios, SafetyState::AlarmFault, state_sender).await;
+            }
         }
         SafetyState::WaitingContactorShutdown => {
             if let Some(contactors_state) = CURRENT_CONTACTORS_STATE.try_get() {

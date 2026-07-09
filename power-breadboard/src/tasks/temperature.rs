@@ -9,7 +9,6 @@ use exo_drivers::{
 
 use crate::{
     tasks::can::{CanData, DATA_CHANNEL, ERROR_CHANNEL, ErrorType, WARNING_CHANNEL, WarningType},
-    util::to_fixed16,
 };
 
 const WARNING_THRESHOLD: f32 = 42.0;
@@ -41,7 +40,7 @@ pub async fn temperature_task(i2c_bus: I2c<'static, Async, Master>) {
             fail_count = 0;
 
             if iter_count == 0 {
-                _ = DATA_CHANNEL.try_send(CanData::Temperature(to_fixed16(temperature, 4)));
+                _ = DATA_CHANNEL.try_send(CanData::Temperature(temperature));
             }
 
             if temperature >= ERROR_THRESHOLD {
