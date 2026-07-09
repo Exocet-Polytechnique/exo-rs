@@ -28,11 +28,14 @@ use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 use embassy_stm32::mode::Async;
 use embassy_stm32::time::Hertz;
-use embassy_stm32::{bind_interrupts, dma, i2c, peripherals};
-use exo_drivers::ds18b20::{self, DS18B20};
+use embassy_stm32::{bind_interrupts, dma, i2c::{self, I2c, Config as I2cConfig}, peripherals};
 use exo_drivers::ltc2944::{self, LTC2944};
 use exo_drivers::one_wire_bus::OneWireBus;
 use fault::Latch;
+use exo_drivers::{
+    ds2484::{DS2484},
+    ds18b20::{self, DS18B20}
+};
 
 bind_interrupts!(struct Irqs {
     I2C4_ER => i2c::ErrorInterruptHandler<peripherals::I2C4>;
@@ -139,7 +142,7 @@ async fn battery_data_task(mut can_tx: can::BufferedCanSender) {
 /// Every 500ms: read the battery temperature and broadcast it. Warns/errors on overtemperature
 /// (edge-triggered, so it doesn't spam the bus).
 #[embassy_executor::task]
-async fn temperature_task(mut bus: OneWireBus, mut sensor: DS18B20, mut can_tx: can::BufferedCanSender) {
+async fn temperature_task(mut bus: DS2484, mut sensor: DS18B20, mut can_tx: can::BufferedCanSender) {
     info!("Temperature task start");
 
     let mut overtemperature_warning = Latch::new();
@@ -285,15 +288,39 @@ async fn main(spawner: Spawner) {
     info!("5V status: {}", output_5v.get_output_level());
     info!("24V status: {}", output_24v.get_output_level());
 
-    // TODO: update to the actual battery temperature sensor pin once the schematic is finalized.
-    let mut one_wire_bus = OneWireBus::init(p.PB0);
-    let mut battery_temp_sensor = DS18B20::new(None);
-    if let Err(e) = battery_temp_sensor
-        .ensure_config(&mut one_wire_bus, ds18b20::Config::default())
-        .await
-    {
-        error!("Failed to configure battery temperature sensor: {}", e);
+    let mut bus = DS2484::new(i2c_con);
+
+    let address = match bus.read_rom().await {
+        Ok(addr) => {
+            defmt::info!("found DS18B20 at address: {:?}", addr);
+            addr
+        }
+        Err(e) => {
+            defmt::error!("error: {:?}", e);
+            defmt::panic!("cannot continue without device");
+        }
+    };
+
+    let mut sensor = DS18B20::new(Some(address));
+
+    match sensor.ensure_config(
+        &mut bus,
+        ds18b20::Config::new(ds18b20::Resolution::TwelveBits),
+    ).await {
+        Ok(())  => defmt::info!("config set"),
+        Err(e)  => defmt::panic!("ensure_config failed: {:?}", e),
     }
+
+
+    // // TODO: update to the actual battery temperature sensor pin once the schematic is finalized.
+    // let mut one_wire_bus = OneWireBus::init(p.PB0);
+    // let mut battery_temp_sensor = DS18B20::new(None);
+    // if let Err(e) = battery_temp_sensor
+    //     .ensure_config(&mut one_wire_bus, ds18b20::Config::default())
+    //     .await
+    // {
+    //     error!("Failed to configure battery temperature sensor: {}", e);
+    // }
 
     let mut can_configurator = can::CanConfigurator::new(p.FDCAN1, p.PA11, p.PA12, Irqs);
     can_configurator.set_bitrate(CAN_BITRATE);
@@ -326,9 +353,9 @@ async fn main(spawner: Spawner) {
         CAN_RX_BUF.init(can::RxBuf::<1>::new()),
     );
 
-    spawner.spawn(unwrap!(battery_task(i2c_con, ltc, can.writer())));
+    //spawner.spawn(unwrap!(battery_task(i2c_con, ltc, can.writer())));
     spawner.spawn(unwrap!(battery_data_task(can.writer())));
-    spawner.spawn(unwrap!(temperature_task(one_wire_bus, battery_temp_sensor, can.writer())));
+    spawner.spawn(unwrap!(temperature_task(bus, sensor, can.writer())));
     spawner.spawn(unwrap!(dashboard_state_task(can.reader(), can.writer())));
 
     // TODO: tasks still missing:
