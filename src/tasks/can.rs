@@ -2,8 +2,6 @@ use defmt::*;
 use embassy_stm32::can::{self, Frame};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 
-use crate::dbc_gen;
-
 pub static CAN_CHANNEL: Channel<CriticalSectionRawMutex, CanEvent, 4> = Channel::new();
 
 // External events derived from DriverInterfaceHAT's frames over CAN, sent to the cockpit task

@@ -1,30 +1,25 @@
 #![no_std]
 #![no_main]
 
-pub mod tasks;
-
 use embassy_executor::Spawner;
 use embassy_stm32::{
-    Config, bind_interrupts,
-    can::{self, filter::{StandardFilter, StandardFilterSlot, FilterType, Action}},
-    peripherals::FDCAN1,
+    Config, bind_interrupts, can::{self, Frame}, gpio::{Input, Level, Output, Pull, Speed}, peripherals::FDCAN1
 };
 use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
-
-use crate::tasks::{can::can_reader, cockpit::cockpit};
-
-pub mod dbc_gen {
-    include!(concat!(env!("OUT_DIR"), "/dbc_gen.rs"));
-}
 
 bind_interrupts!(struct Irqs {
     FDCAN1_IT0 => can::IT0InterruptHandler<FDCAN1>;
     FDCAN1_IT1 => can::IT1InterruptHandler<FDCAN1>;
 });
 
+enum State {
+    Stopped,
+    Running,
+}
+
 #[embassy_executor::main]
-async fn main(spawner: Spawner) {
+async fn main(_spawner: Spawner) {
     let mut config = Config::default();
     {
         use embassy_stm32::rcc::*;
@@ -35,35 +30,44 @@ async fn main(spawner: Spawner) {
     let mut configurator = can::CanConfigurator::new(p.FDCAN1, p.PA11, p.PA12, Irqs);
     configurator.set_bitrate(250_000);
 
-    // Configure CAN filter to accept only DriverInterfaceHAT's frames (HP_PCB05_E=271,
-    // LP_PCB05_E=1295, LP_PCB05_P=1311) and reject all others. Only LP_PCB05_P is acted on
-    // today; the error/warning frames are admitted for future use.
-    // Mask 0x3EF covers every bit the three IDs share; the remaining two bits are
-    // exactly what distinguishes them from each other, so no other message ID matches.
-    configurator.properties().set_standard_filter(
-        StandardFilterSlot::_0,
-        StandardFilter {
-            filter: FilterType::BitMask { filter: 271_u16, mask: 0x3EF },
-            action: Action::StoreInFifo0,
-        },
-    );
-    // Slot 1: catch-all reject — frames not matched by slot 0 are discarded
-    configurator.properties().set_standard_filter(
-        StandardFilterSlot::_1,
-        StandardFilter {
-            filter: FilterType::BitMask { filter: 0_u16, mask: 0_u16 },
-            action: Action::Reject,
-        },
-    );
-    let can: can::Can<'static> = configurator.start(can::OperatingMode::NormalOperationMode);
-    let (tx, rx, _props) = can.split();
+    let mut can: can::Can<'static> = configurator.start(can::OperatingMode::NormalOperationMode);
 
-    spawner.spawn(can_reader(rx)).unwrap();
-    spawner
-        .spawn(cockpit(spawner, p.PA8, p.PA6, p.PA7, p.PB13, p.PB11, tx))
-        .unwrap();
+    let start_button = Input::new(p.PB13, Pull::Down);
+    let stop_button = Input::new(p.PB11, Pull::Down);
+
+    let mut led_g = Output::new(p.PA8, Level::Low, Speed::Low);
+    let mut led_r = Output::new(p.PA7, Level::High, Speed::Low);
+
+    let mut current_state = State::Stopped;
+
+    let start_frame = Frame::new_standard(0x00, &[0xFA, 0xCE, 0xFA, 0xCE]).unwrap();
+    let stop_frame = Frame::new_standard(0x00, &[0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
 
     loop {
-        Timer::after_millis(1000).await;
+        match current_state {
+            State::Stopped => {
+                if start_button.is_high() {
+                    led_r.set_low();
+                    for _ in 0..3 {
+                        can.write(&start_frame).await;
+                        Timer::after_millis(100).await;
+                    }
+                    current_state = State::Running;
+                    led_g.set_high();
+                }
+            }
+            State::Running => {
+                if stop_button.is_high() {
+                    led_g.set_low();
+                    for _ in 0..3 {
+                        can.write(&stop_frame).await;
+                        Timer::after_millis(100).await;
+                    }
+                    current_state = State::Stopped;
+                    led_r.set_high();
+                }
+            }
+        }
+        Timer::after_millis(10).await;
     }
 }
