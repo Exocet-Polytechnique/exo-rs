@@ -40,6 +40,7 @@ async fn main(_spawner: Spawner) {
 
     let mut current_state = State::Stopped;
 
+    // Temporary frames: to be changed
     let start_frame = Frame::new_standard(0x00, &[0xFA, 0xCE, 0xFA, 0xCE]).unwrap();
     let stop_frame = Frame::new_standard(0x00, &[0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
 
